@@ -1,14 +1,24 @@
 // Photo -> ranked card matches. Used by the live scanner and by batch processing.
 import { getWorker, readCard, readStamps } from './ocr.js';
 import { rankCandidates, findNamesInText } from './match.js';
+import { rerank, lookupIds, borderColor } from './rerank.js';
 import { catalog, catalogReady, abbrReady } from './catalog.js';
 import { getCard } from './api.js';
 
+// The second pass looks up the details (HP, attacks, illustrator…) of the best few
+// candidates. The downloads start before the artwork is read; what hasn't come this long
+// after they started (or a little while after the artwork is read) is skipped: a slow or
+// missing connection costs at most about half a second.
+const DETAILS_WAIT = 600;
+const DETAILS_WAIT_AFTER = 150; // at least, after the artwork: copies saved on the device come that fast
+
 /**
  * Read a card image (camera guide crop or a whole photo) and rank matching cards.
- * Returns { ranked: [{ card, set, score, reasons }], clues, debug, card } where
- * `card` is the straightened card canvas (null if no card was found), see ocr.readCard.
- * Never waits for the network beyond the card list: card details are only fetched ahead.
+ * Returns { ranked: [{ card, set, score, reasons }], clues, debug, card, border } where
+ * `card` is the straightened card canvas (null if no card was found), see ocr.readCard,
+ * and `border` the average colour of its edge ([r, g, b] or null).
+ * Never waits long for the network beyond the card list: the best few candidates' details
+ * are looked up while the artwork is read, and skipped if they don't come in time (offline).
  */
 export async function identify(canvas, onStatus) {
   onStatus?.('Loading text recognition…');
@@ -22,13 +32,19 @@ export async function identify(canvas, onStatus) {
   // Lets the reader check names against every known card (undefined until the catalog is in).
   const findName = (text) => (catalog.index ? findNamesInText(catalog.index, text, { limit: 1 })[0] || null : undefined);
   const { clues, debug, card } = await readCard(canvas, onStatus, { findName });
+  // A name the dictionary found somewhere in the text counts less than one read in its place.
+  if (debug.nameFrom) clues.nameFrom = debug.nameFrom;
   onStatus?.('Matching card…');
   await ready;
   if (clues.setCodes.length || clues.codeCandidates.length) await abbrReady();
-  const ranked = rankCandidates(catalog.index, clues, catalog.setAbbr);
-  // The result sheet and the batch queue ask for the best match's prices next: start the
-  // download now, while the stamps are read (api.js shares it with their request).
-  if (ranked.length) getCard(ranked[0].card.id).catch(() => {});
+  const first = rankCandidates(catalog.index, clues, catalog.setAbbr, 150);
+  const border = borderColor(card);
+  const ctx = { index: catalog.index, getCard };
+  // Start downloading the details the second pass will want (the result sheet and the batch
+  // queue then ask for the best match's prices: api.js shares the download), while the
+  // stamps are read.
+  const asked = performance.now();
+  for (const id of lookupIds(first, { clues, debug, border }, ctx)) getCard(id).catch(() => {});
   // Stamps (set logo, 1st Edition, Play! Pokémon…) tell versions apart. Read whatever the
   // best match is: the user may pick another match (or re-match) that has stamped versions.
   if (card) {
@@ -40,5 +56,12 @@ export async function identify(canvas, onStatus) {
     }
     debug.art = clues.artText;
   }
-  return { ranked, clues, debug, card };
+  let ranked = first;
+  try {
+    const left = navigator.onLine === false ? 0 : DETAILS_WAIT - (performance.now() - asked);
+    ranked = await rerank(first, { clues, debug, border }, { ...ctx, timeoutMs: Math.max(DETAILS_WAIT_AFTER, left) });
+  } catch (e) {
+    console.warn('second pass failed', e);
+  }
+  return { ranked: ranked.slice(0, 40), clues, debug, card, border };
 }

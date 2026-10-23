@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parseBottomText, pickName, cleanNameLine } from '../js/parse.js';
-import { buildIndex, rankCandidates, partialSimilarity, parseLocalId, manualSearch, confidence } from '../js/match.js';
+import { buildIndex, rankCandidates, partialSimilarity, parseLocalId, manualSearch, confidence, coreName, nameMarks } from '../js/match.js';
 import { variantPrices, headlinePrice, marketLinks, searchQuery, printedNumber, variantImage, eurToUsd, priceInUsd, variantLabel } from '../js/prices.js';
 
 const fx = (f) => JSON.parse(fs.readFileSync(new URL(`./fixtures/${f}`, import.meta.url)));
@@ -208,6 +208,59 @@ test('explicit set choice limits results', () => {
   assert.equal(all[0].card.id, 'me03-012');
   assert.ok(all.every((x) => x.card.setId === 'me03'));
   assert.equal(manualSearch(index, '', '24', catalog.abbr, 'me03')[0].card.id, 'me03-024');
+});
+
+test('name marks: logos printed next to the name', () => {
+  assert.equal(coreName('Charizard ex'), 'Charizard');
+  assert.equal(coreName('M Charizard EX'), 'Charizard');
+  assert.equal(coreName('Flygon ex δ'), 'Flygon');
+  assert.equal(coreName('Mega Charizard X ex'), 'Mega Charizard X');
+  assert.equal(coreName('Pikachu'), 'Pikachu');
+  assert.deepEqual(nameMarks('Solgaleo & Lunala GX'), ['gx', '&']);
+  assert.deepEqual(nameMarks('Umbreon VMAX'), ['vmax']);
+  assert.deepEqual(nameMarks('Charizard'), []);
+});
+
+test('a name read without its logo mark still finds the marked cards', () => {
+  // OCR often drops the stylized "ex"/"V": every Charizard printing is a candidate, for the
+  // second pass (rerank.js) to tell apart.
+  const r = rankCandidates(index, { nameBest: 'Charizard', nameAll: '', numbers: [], setCodes: [], codeCandidates: [] }, catalog.abbr);
+  const found = new Set(r.map((x) => x.card.name));
+  for (const n of ['Charizard', 'Charizard ex']) assert.ok(found.has(n), n);
+  const ex = r.find((x) => x.card.name === 'Charizard ex');
+  const plain = r.find((x) => x.card.name === 'Charizard');
+  assert.ok(Math.abs(ex.score - plain.score) < 0.01);
+  // Read in full, the marked name wins.
+  assert.equal(rankCandidates(index, { nameBest: 'Charizard ex', nameAll: '', numbers: [], setCodes: [], codeCandidates: [] }, catalog.abbr)[0].card.name, 'Charizard ex');
+});
+
+test('TAG TEAM found from one of its names; a longer name explains more of the read', () => {
+  const tag = buildIndex(
+    [
+      { id: 'sm12-75', localId: '75', name: 'Solgaleo & Lunala GX' },
+      { id: 'sm1-66', localId: '66', name: 'Lunala' },
+      { id: 'base1-4', localId: '4', name: 'Charizard' },
+      { id: 'base5-21', localId: '21', name: 'Dark Charizard' },
+    ],
+    [
+      { id: 'base1', name: 'Base Set', cardCount: { total: 102, official: 102 } },
+      { id: 'base5', name: 'Team Rocket', cardCount: { total: 83, official: 82 } },
+      { id: 'sm1', name: 'Sun & Moon', cardCount: { total: 173, official: 149 } },
+      { id: 'sm12', name: 'Cosmic Eclipse', cardCount: { total: 271, official: 236 } },
+    ],
+  );
+  const rank = (nameBest) => rankCandidates(tag, { nameBest, nameAll: '', numbers: [], setCodes: [], codeCandidates: [] });
+  assert.ok(rank('unala').some((x) => x.card.id === 'sm12-75'));
+  assert.equal(rank('Solgaleo Lunala')[0].card.id, 'sm12-75');
+  assert.equal(rank('ark Charizard')[0].card.id, 'base5-21');
+  assert.equal(rank('Charizard')[0].card.id, 'base1-4');
+});
+
+test('a name the dictionary found elsewhere counts less than one read in the name area', () => {
+  const c = { nameBest: 'Charizard', nameAll: '', numbers: [], setCodes: [], codeCandidates: [] };
+  const read = rankCandidates(index, c, catalog.abbr)[0].score;
+  const found = rankCandidates(index, { ...c, nameFrom: 'dictionary' }, catalog.abbr)[0].score;
+  assert.ok(found < read);
 });
 
 test('Aurorus from the real photo clues', () => {

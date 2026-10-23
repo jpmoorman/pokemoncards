@@ -6,10 +6,13 @@
 // --split   use only the "dev" (tuning) or "holdout" (final check) half, same split as rank-eval.mjs
 // --save-cards  also save each straightened card as <dir>/<photo id>.jpg for fast OCR experiments
 //
-// The photo folder needs labels.json, raw/<id>.jpg and catalog/{cards,sets,set-codes}.json
-// (see the private pokemoncards-testphotos repo). Photos never leave this machine.
+// The photo folder needs labels.json, raw/<id>.jpg and catalog/{cards,sets,set-codes}.json,
+// plus catalog/details.json.gz for the card details identify's second pass looks up (without
+// it every lookup is "not found", as offline) (see the private pokemoncards-testphotos repo).
+// Photos never leave this machine.
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { startHarness, results } from './harness.mjs';
 
 const arg = (name, def) => {
@@ -39,6 +42,34 @@ const todo = limit ? labels.slice(0, limit) : labels;
 const cards = fs.readFileSync(path.join(dir, 'catalog/cards.json'), 'utf8');
 const sets = fs.readFileSync(path.join(dir, 'catalog/sets.json'), 'utf8');
 const codes = JSON.parse(fs.readFileSync(path.join(dir, 'catalog/set-codes.json')));
+// Card details (HP, attacks, illustrator…) for /cards/<id>, as identify's second pass looks
+// up the best few candidates: a snapshot, shaped like the TCGdex card the app downloads.
+const detailsFile = path.join(dir, 'catalog/details.json.gz');
+const details = fs.existsSync(detailsFile) ? JSON.parse(zlib.gunzipSync(fs.readFileSync(detailsFile))) : {};
+const cardById = new Map(JSON.parse(cards).map((c) => [c.id, c]));
+const setById = new Map(JSON.parse(sets).map((s) => [s.id, s]));
+function apiCard(id) {
+  const d = details[id];
+  const c = cardById.get(id);
+  if (!d || !c) return null;
+  const set = setById.get(id.slice(0, id.length - String(c.localId).length - 1));
+  const has = (t, stamp) => d.variants.some((v) => v.type === t && (!stamp || (v.stamp || []).includes(stamp)));
+  return {
+    ...c,
+    category: d.category,
+    hp: d.hp ?? undefined,
+    types: d.types ?? undefined,
+    stage: d.stage ?? undefined,
+    attacks: d.attacks.map((name) => ({ name })),
+    abilities: d.abilities.map((name) => ({ type: 'Ability', name })),
+    effect: d.effect || undefined,
+    illustrator: d.illustrator ?? undefined,
+    rarity: d.rarity,
+    regulationMark: d.regulationMark ?? undefined,
+    set: set && { id: set.id, name: set.name, cardCount: set.cardCount },
+    variants: { normal: has('normal'), reverse: has('reverse'), holo: has('holo'), firstEdition: has('holo', '1st-edition') || has('normal', '1st-edition') },
+  };
+}
 
 const h = await startHarness();
 // Fresh page with routes set BEFORE the app loads, so it never caches the small test fixtures.
@@ -52,6 +83,9 @@ await page.route('https://api.tcgdex.net/**', (route) => {
   if (p === '/cards') return json(route, cards);
   const m = /^\/sets\/([^/]+)$/.exec(p);
   if (m) return json(route, JSON.stringify({ id: m[1], abbreviation: codes[m[1]] ? { official: codes[m[1]] } : undefined }));
+  const c = /^\/cards\/([^/]+)$/.exec(p);
+  const card = c && apiCard(decodeURIComponent(c[1]));
+  if (card) return json(route, JSON.stringify(card));
   return route.fulfill({ status: 404, headers: { 'access-control-allow-origin': '*' }, body: '{}' });
 });
 await page.route('https://photos.local/**', (route) => {
@@ -81,25 +115,8 @@ for (const [i, l] of todo.entries()) {
     const started = performance.now();
     try {
       const canvas = await fileToCanvas(blob);
-      const { ranked, clues, debug, card } = await identify(canvas);
-      // Border colour of the straightened card (yellow = WOTC..SWSH era, silver = SV/ME era).
-      let border = null;
-      if (card?.width) {
-        const c2 = document.createElement('canvas');
-        c2.width = 63;
-        c2.height = 88;
-        const g = c2.getContext('2d', { willReadFrequently: true });
-        g.drawImage(card, 0, 0, 63, 88);
-        const px = g.getImageData(0, 0, 63, 88).data;
-        let r = 0, gg = 0, b = 0, n = 0;
-        for (let y = 0; y < 88; y++) for (let x = 0; x < 63; x++) {
-          const edge = x < 3 || x > 59 || y < 3 || y > 84;
-          if (!edge) continue;
-          const i = (y * 63 + x) * 4;
-          r += px[i]; gg += px[i + 1]; b += px[i + 2]; n++;
-        }
-        border = [Math.round(r / n), Math.round(gg / n), Math.round(b / n)];
-      }
+      // border: colour of the straightened card's edge (yellow = WOTC..SWSH era, silver = SV/ME era).
+      const { ranked, clues, debug, card, border } = await identify(canvas);
       const cardJpeg = wantCard && card?.width ? card.toDataURL('image/jpeg', 0.92) : null;
       return {
         clues,

@@ -1,6 +1,7 @@
 // Camera capture, image clean-up and on-device text recognition (Tesseract.js).
-import { parseBottomText, pickName } from './parse.js';
+import { parseBottomText, parseLabelNumbers, pickName } from './parse.js';
 import { CARD_ASPECT, detectCard, warpCard, rotateCorners } from './detect.js';
+import { catalog } from './catalog.js';
 
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js';
 
@@ -9,7 +10,18 @@ export { CARD_ASPECT };
 
 // Regions of a straightened card, as fractions of its width/height.
 export const NAME_REGION = { x: 0.0, y: 0.0, w: 0.86, h: 0.17 };
-export const BOTTOM_REGION = { x: 0.0, y: 0.84, w: 1.0, h: 0.16 };
+// Where the collector number and set code are printed: bottom left from Black & White on
+// ("G MEW EN 199/165", under the illustrator), bottom right before that ("17/111 ★", at the
+// end of the copyright line). Both are read in one go, one under the other.
+export const NUMBER_REGIONS = [
+  { x: 0.02, y: 0.875, w: 0.5, h: 0.11 },
+  { x: 0.55, y: 0.9, w: 0.43, h: 0.095 },
+];
+// Just the number's own spot in each, read when the whole areas gave no number.
+export const NUMBER_SPOTS = [
+  { x: 0.1, y: 0.9, w: 0.3, h: 0.08 },
+  { x: 0.66, y: 0.91, w: 0.32, h: 0.075 },
+];
 // Artwork window; set-logo and other stamps sit in its lower part.
 export const ART_REGION = { x: 0.04, y: 0.09, w: 0.92, h: 0.42 };
 // Lower artwork plus the strip under it, read for stamps: set logos sit in the art's
@@ -167,17 +179,20 @@ function crop(src, r, targetW, maxPixels = Infinity) {
  * Grayscale, flatten the lighting (divide by the local background brightness, so
  * dark text reads the same on a light border, a grey-blue name bar or next to a
  * white sticker), then contrast stretch (1st–99th percentile). `invert` turns
- * light-on-dark text into dark-on-light first.
+ * light-on-dark text into dark-on-light first. `text: 'black'` reads only black text:
+ * every colour but black turns light (a pixel counts as bright as its brightest channel);
+ * `text: 'white'` (inverted) only white text, every colour but white turning dark.
  */
-function enhance(canvas, invert = false) {
+function enhance(canvas, invert = false, { text } = {}) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const w = canvas.width;
   const h = canvas.height;
   const img = ctx.getImageData(0, 0, w, h);
   const d = img.data;
   const g = new Float32Array(w * h);
+  const pick = text === 'black' ? Math.max : text === 'white' ? Math.min : null;
   for (let i = 0; i < g.length; i++) {
-    const v = (d[i * 4] * 299 + d[i * 4 + 1] * 587 + d[i * 4 + 2] * 114) / 1000;
+    const v = pick ? pick(d[i * 4], d[i * 4 + 1], d[i * 4 + 2]) : (d[i * 4] * 299 + d[i * 4 + 1] * 587 + d[i * 4 + 2] * 114) / 1000;
     g[i] = invert ? 255 - v : v;
   }
   flattenLight(g, w, h);
@@ -257,11 +272,19 @@ function flattenLight(g, w, h) {
   }
 }
 
-function copy(canvas) {
+/** Pictures one under the other on white, `gap` px apart. */
+function stack(canvases, gap = 30) {
   const c = document.createElement('canvas');
-  c.width = canvas.width;
-  c.height = canvas.height;
-  c.getContext('2d').drawImage(canvas, 0, 0);
+  c.width = Math.max(...canvases.map((k) => k.width));
+  c.height = canvases.reduce((h, k) => h + k.height, 0) + gap * (canvases.length - 1);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  let y = 0;
+  for (const k of canvases) {
+    ctx.drawImage(k, 0, y);
+    y += k.height + gap;
+  }
   return c;
 }
 
@@ -300,9 +323,11 @@ function withWorker(job) {
   return run;
 }
 
-async function recognize(canvas, psm) {
+// Tesseract's thresholding: 0 = one threshold for the whole picture (Otsu), 2 = one per tile
+// (adaptive Otsu), which keeps small dark text on a mid-grey patch next to a light border.
+async function recognize(canvas, psm, { adaptive = false } = {}) {
   const data = await withWorker(async (worker) => {
-    await worker.setParameters({ tessedit_pageseg_mode: String(psm), preserve_interword_spaces: '1' });
+    await worker.setParameters({ tessedit_pageseg_mode: String(psm), preserve_interword_spaces: '1', thresholding_method: adaptive ? '2' : '0' });
     return (await worker.recognize(canvas, {}, { text: true, blocks: true })).data;
   });
   const lines = [];
@@ -343,34 +368,62 @@ function legible(lines, re) {
   return Math.max(0, ...lines.filter((l) => re.test(l.text)).map((l) => l.conf));
 }
 
-/** Name-area OCR (sparse text). `conf`: how clearly it read, see legible. */
+/**
+ * Name-area OCR (sparse text), black text only: the coloured name bar turns light.
+ * `conf`: how clearly it read, see legible.
+ */
 async function readName(card, ocr) {
-  const img = enhance(crop(card, NAME_REGION, 1600));
-  const res = await ocr(img, 11);
-  return { name: pickName(res.lines), text: res.text, conf: legible(res.lines, /[A-Za-z]{3}/), img };
+  const res = await ocr(enhance(crop(card, NAME_REGION, 1600), false, { text: 'black' }), 11);
+  return { name: pickName(res.lines), text: res.text, conf: legible(res.lines, /[A-Za-z]{3}/), card };
 }
 
-/** A name read that isn't a known card name, read again as one block of text (sparse-text mode gets lost on some name bars). */
+/**
+ * A name read that isn't a known card name, read again as one block of text (sparse-text
+ * mode gets lost on some name bars), in plain grey this time (white names too).
+ */
 async function nameAgain(r, ocr, isKnown) {
   if (isKnown(r.name.best) || isKnown(r.text)) return r;
-  const again = await ocr(r.img, 6);
+  const again = await ocr(enhance(crop(r.card, NAME_REGION, 1600)), 6);
   const n2 = pickName(again.lines);
   const name = isKnown(n2.best) || isKnown(again.text) || !r.name.best ? n2 : r.name;
   return { ...r, name, text: `${r.text}\n---block---\n${again.text}` };
 }
 
-/** Bottom-line OCR (number, set code). */
-async function readBottom(card, ocr) {
-  const base = crop(card, BOTTOM_REGION, 2200);
-  const res = await ocr(enhance(copy(base)), 11);
-  return { bottom: parseBottomText(res.text), text: res.text, conf: legible(res.lines, /[A-Za-z0-9]{3}/), base };
+// Printed set sizes, from the card list once it is in: a number OCR mangled is still found
+// next to one of them (see parse.js).
+let sizes = { of: null, set: undefined };
+function setSizes() {
+  const sets = catalog.index?.setsById;
+  if (sets && sizes.of !== sets) sizes = { of: sets, set: new Set([...sets.values()].map((s) => s.cardCount?.official).filter((n) => n >= 20)) };
+  return sizes.set;
 }
 
-/** A bottom read without a number, read again inverted: white text on dark full-art cards reads better that way. */
-async function bottomInverted(r, ocr) {
-  if (r.bottom.numbers.length) return r;
-  const res = await ocr(enhance(r.base, true), 11);
-  return { ...r, bottom: mergeBottom(r.bottom, parseBottomText(res.text)), text: `${r.text}\n---inverted---\n${res.text}` };
+/**
+ * Number areas (or spots) of a card, enlarged to `width`, cleaned up and put one under the
+ * other: black text, or (inverted) white text.
+ */
+function numberAreas(card, regions, width, inverted) {
+  return stack(regions.map((r) => enhance(crop(card, r, width), inverted, { text: inverted ? 'white' : 'black' })));
+}
+
+/** Number-area OCR (collector number, set code), as one block of text. */
+async function readBottom(card, ocr) {
+  const res = await ocr(numberAreas(card, NUMBER_REGIONS, 1400, false), 6, { adaptive: true });
+  return { bottom: parseBottomText(res.text, { totals: setSizes() }), text: res.text, conf: legible(res.lines, /[A-Za-z0-9]{3}/), card };
+}
+
+/**
+ * A bottom read without a number (or only one without its set size, like a promo's): the
+ * number spots alone, with less around them to get lost in; then the same for white text
+ * (full-art and special cards).
+ */
+async function bottomAgain(r, ocr) {
+  for (const inverted of [false, true]) {
+    if (r.bottom.numbers.some((n) => n.total)) break;
+    const res = await ocr(numberAreas(r.card, NUMBER_SPOTS, 900, inverted), 6, { adaptive: true });
+    r = { ...r, bottom: mergeBottom(r.bottom, parseBottomText(res.text, { totals: setSizes() })), text: `${r.text}\n---${inverted ? 'white' : 'spots'}---\n${res.text}` };
+  }
+  return r;
 }
 
 // Keep a sliver around a found card, in case an edge was found on its inner frame.
@@ -474,15 +527,15 @@ function plan(canvas, guide, found) {
  *          was found, how many OCR passes it took and what was read in which order,
  *   card:  the card as read, as a canvas: straightened (portrait, ~600–1000 px wide, 1.5%
  *          margin), or the camera guide crop; null when no card was found or read in a
- *          photo. Areas are fractions of it (NAME_REGION, BOTTOM_REGION, ART_REGION); OCR
+ *          photo. Areas are fractions of it (NAME_REGION, NUMBER_REGIONS, ART_REGION); OCR
  *          more of it with readRegion(card, region).
  * }
  */
 export async function readCard(canvas, onStatus, opts = {}) {
   const debug = { name: '', bottom: '', full: '', detect: '', reads: 0, steps: [] };
-  const ocr = (img, psm) => {
+  const ocr = (img, psm, o) => {
     debug.reads++;
-    return recognize(img, psm);
+    return recognize(img, psm, o);
   };
   const seen = new Map();
   const lookup = (text) => {
@@ -536,8 +589,11 @@ export async function readCard(canvas, onStatus, opts = {}) {
     nameText = n.text;
     bottom = b.bottom;
   };
+  // A number read with its set size (or a promo's, "SWSH050"): a lone one ("041") may be
+  // anything, upside-down text too.
+  const numbered = () => bottom.numbers.some((n) => n.total || n.prefix);
   // A number or a clearly read name means this is the card, the right way up.
-  const done = () => bottom.numbers.length || isSure(name.best) || isSure(nameText);
+  const done = () => numbered() || isSure(name.best) || isSure(nameText);
 
   let first = null;
   let turned = false;
@@ -549,7 +605,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
     if (!todo.light) n = await nameAgain(n, ocr, isKnown);
     onStatus?.('Reading card number…');
     let b = await readBottom(v.card, ocr);
-    if (!todo.light) b = await bottomInverted(b, ocr);
+    if (!todo.light) b = await bottomAgain(b, ocr);
     note(v, n, b);
     first = { n, b };
     use(v, n, b);
@@ -558,7 +614,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
     if (todo.light && !done()) card = null;
   }
 
-  if (first && !bottom.numbers.length && !upright(first) && todo.turns.length) {
+  if (first && !numbered() && !upright(first) && todo.turns.length) {
     // Maybe the card is the other way round. Taken that way, a card name must read
     // clearly (or be the only one read at all); failing that, the way round whose text
     // reads with clearly higher OCR confidence wins. A bottom line that read clearly is
@@ -587,7 +643,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
       // It reads this way round: start over from here.
       onStatus?.('Reading card number…');
       const n = await nameAgain(turn.n, ocr, isKnown);
-      const b = await bottomInverted(turn.b || (await readBottom(turn.v.card, ocr)), ocr);
+      const b = await bottomAgain(turn.b || (await readBottom(turn.v.card, ocr)), ocr);
       note(turn.v, n, b);
       use(turn.v, n, b);
       turned = true;
@@ -616,15 +672,25 @@ export async function readCard(canvas, onStatus, opts = {}) {
   debug.name = [...tried].filter(([, t]) => t.name != null).map(([v, t]) => label(v) + t.name).join('\n');
   debug.bottom = [...tried].filter(([, t]) => t.bottom != null).map(([v, t]) => label(v) + t.bottom).join('\n');
 
+  // No number on the card: a graded card's slab label gives it ("#199 CHARIZARD EX"), read
+  // with the name area when the slab was taken for the card.
+  if (!numbered()) {
+    const onLabel = parseLabelNumbers(nameText);
+    if (onLabel.length) {
+      bottom = mergeBottom(bottom, { numbers: onLabel, setCodes: [], codeCandidates: [] });
+      debug.steps.push('number from a slab label');
+    }
+  }
+
   let fullText = '';
   // A known card name anywhere in the name area's text counts (it is used below).
   const nameKnown = isKnown(name.best) || isKnown(nameText);
-  if (!bottom.numbers.length || !nameKnown) {
+  if (!numbered() || !nameKnown) {
     onStatus?.('Reading whole card…');
     // Nothing usable from any outline: maybe it wasn't the card, so read the whole picture
     // (shrunk, see PICTURE_PIXELS). Else the whole card: at that scale OCR often gets a
     // number (or name) its own area's read missed.
-    const picture = !card || (!bottom.numbers.length && !nameKnown);
+    const picture = !card || (!numbered() && !nameKnown);
     const src = picture ? canvas : card;
     const maxPixels = !picture ? Infinity : todo.light ? PICTURE_PIXELS.main : PICTURE_PIXELS.last;
     const full = enhance(crop(src, { x: 0, y: 0, w: 1, h: 1 }, Math.min(2000, Math.max(1200, src.width)), maxPixels));
@@ -664,7 +730,8 @@ function mergeBottom(a, b) {
   const key = (n) => `${n.prefix}|${n.num}|${n.total}`;
   const seen = new Set(a.numbers.map(key));
   return {
-    numbers: [...a.numbers, ...b.numbers.filter((n) => !seen.has(key(n)))],
+    // Numbers read with their set size first: a lone one ("067") is more often something else.
+    numbers: [...a.numbers, ...b.numbers.filter((n) => !seen.has(key(n)))].sort((x, y) => (x.total == null) - (y.total == null)),
     setCodes: [...new Set([...a.setCodes, ...b.setCodes])],
     codeCandidates: [...new Set([...a.codeCandidates, ...b.codeCandidates])],
   };

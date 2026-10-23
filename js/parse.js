@@ -27,11 +27,61 @@ const PROMO_PREFIXES = ['SWSH', 'HGSS', 'SVP', 'MEP', 'SM', 'XY', 'BW', 'DP', 'S
 const SUBSET_PREFIXES = ['TG', 'GG', 'SV', 'RC', 'H'];
 
 /**
+ * Collector numbers OCR mangled past the regular patterns, found by the set size printed
+ * after them: with `totals` (every printed set size, from the catalog) "12/1014" (the
+ * rarity star read as a digit), "IS/111" or "E5261/236" (letters around it) still give
+ * 12/101, 15/111 and 261/236; a 3-digit number whose slash was lost or read as 7 or 1
+ * ("1837165", "105123") gives 183/165 and 105/123.
+ * Returns up to `max` [rawNum, rawTotal], most likely first.
+ */
+function looseNumbers(t, totals, max = 2) {
+  const found = [];
+  // Runs of digits, slashes and letters OCR confuses with them.
+  for (const m of t.matchAll(/[0-9OoIilLSBDZ|/\\]{4,14}/g)) {
+    const s = m[0].replace(/\\/g, '/');
+    // Not a Pokédex number ("#157", "NO. 0699"), level, HP, damage, weight or year.
+    const pre = t.slice(Math.max(0, m.index - 4), m.index);
+    if (/(#|N[oO0]\.?\s*|L[vV]\.?\s*|HP\s*|[-+×©])$/.test(pre) || /^\s*(lbs|HP|[+×,-])/.test(t.slice(m.index + s.length))) continue;
+    for (let i = 1; i < s.length; i++) {
+      for (const len of [3, 2]) {
+        // ("088" for 88: modern sets print the size zero-padded to three digits.)
+        const tot = s.slice(i, i + len);
+        if (tot.length < len || !/^\d+$/.test(tot) || !totals.has(parseInt(tot, 10))) continue;
+        // After the size: nothing, or the rarity mark read as a character or a few.
+        const after = s.length - (i + len);
+        const sep = s[i - 1];
+        let raw;
+        if (sep === '/' && after <= 2) raw = s.slice(0, i - 1).slice(-len);
+        else if (len === 3 && after <= 3) {
+          // No slash read: only a 3-digit number, its slash lost or read as 7, 1, l, I or |.
+          const lost = s.slice(Math.max(0, i - 3), i);
+          const misread = /[71lI|]/.test(sep) ? s.slice(Math.max(0, i - 4), i - 1) : '';
+          raw = [misread, lost].find((x) => x.length === 3 && /^\d+$/.test(fixDigits(x)) && /\d{2}/.test(x));
+        }
+        if (!raw || (sep !== '/' && !/\d/.test(raw))) continue;
+        const num = parseInt(fixDigits(raw), 10);
+        const total = parseInt(tot, 10);
+        // Secret rares run past the set size, but not by much without a slash to tell.
+        if (!(num > 0 && num <= total + 150 && (sep === '/' || num <= total * 1.6))) continue;
+        // A read slash first, then the misread one, then a 3-digit size with less after it.
+        found.push({ raw, tot, score: (sep === '/' ? 4 : /[71lI|]/.test(sep) && raw !== s.slice(i - 3, i) ? 1 : 0) + len - after / 2 });
+      }
+    }
+  }
+  return found
+    .sort((a, b) => b.score - a.score)
+    .slice(0, max)
+    .map((f) => [f.raw, f.tot]);
+}
+
+/**
  * Extract collector numbers and set codes from the text found near the
  * bottom of a card (or the whole card when that's all we have).
- * Returns { numbers: [{prefix, num, total}], setCodes: [string] }.
+ * `totals`: optional Set of printed set sizes; numbers that only read with one of them are
+ * found too (see looseNumbers), and numbers with a known size come first.
+ * Returns { numbers: [{prefix, num, total, text}], setCodes: [string], codeCandidates: [string] }.
  */
-export function parseBottomText(text) {
+export function parseBottomText(text, { totals } = {}) {
   const t = (text || '').replace(/[–—−]/g, '-').replace(/[⁄∕]/g, '/');
   const numbers = [];
   const seen = new Set();
@@ -63,6 +113,12 @@ export function parseBottomText(text) {
     if (hasDigit(m[1]) && hasDigit(m[2])) push('', m[1], m[2]);
   }
 
+  // Known set sizes: a number with none of them read may be mangled beyond the patterns.
+  const known = (n) => n.total != null && !!totals?.has(n.total);
+  if (totals?.size && !numbers.some(known)) {
+    for (const [rawNum, rawTotal] of looseNumbers(t, totals)) push('', rawNum, rawTotal);
+  }
+
   // Slash misread as "1", "l" or "|" ("1251197"): only try when nothing else matched.
   if (!numbers.length) {
     const looseRe = /(?<![0-9])(\d{1,3})\s*[|\\lI]\s*(\d{2,3})(?![0-9])/g;
@@ -84,6 +140,9 @@ export function parseBottomText(text) {
     for (const m of t.matchAll(promoRe)) push(m[1].toUpperCase(), m[2], null);
     // Number right after a set code: "OBF EN 125" when the "/197" got lost.
     for (const m of t.matchAll(/\b[A-Z]{3}\s*EN\s*(\d{1,3})\b/g)) push('', m[1], null);
+    // Else a number printed zero-padded ("067": Mega Evolution promos print no set size),
+    // standing alone.
+    if (!numbers.length) for (const m of t.matchAll(/(?<![\w/.,])[0O]\d{2}(?![\d/])/g)) push('', m[0], null);
   }
 
   // Loose 3-letter uppercase tokens; matched against known set codes later.
@@ -92,7 +151,27 @@ export function parseBottomText(text) {
     if (/[A-Z]/.test(m[1]) && !setCodes.includes(m[1]) && !codeCandidates.includes(m[1])) codeCandidates.push(m[1]);
   }
 
+  // Numbers with a real set size first.
+  if (totals?.size) numbers.sort((a, b) => known(b) - known(a));
   return { numbers, setCodes, codeCandidates };
+}
+
+/**
+ * The collector number on a grading company's slab label ("2023 SCARLET & VIOLET 151
+ * #199 CHARIZARD EX", "2026 POKEMON PERFECT ORDER #024/088"), read with the name area
+ * when the slab was taken for the card.
+ * Returns numbers like parseBottomText's.
+ */
+export function parseLabelNumbers(text) {
+  const out = [];
+  // A label starts with the card's year; a name area without one has no label in it.
+  if (!/\b(199[6-9]|20[0-4]\d)\b/.test(text || '')) return out;
+  for (const m of (text || '').matchAll(/#\s?(TG|GG|SWSH|SM|XY|BW|SVP|SV)?\s?(\d{1,3})(?:\s?\/\s?(?:TG|GG)?(\d{2,3}))?(?![\d/])/g)) {
+    const num = parseInt(m[2], 10);
+    const total = m[3] ? parseInt(m[3], 10) : null;
+    if (num > 0 && !out.some((n) => n.num === num)) out.push({ prefix: m[1] || '', num, total, text: `${m[1] || ''}${m[2]}${m[3] ? `/${m[3]}` : ''}` });
+  }
+  return out;
 }
 
 /** Lowercase, strip accents and punctuation. "Pokémon Catcher!" -> "pokemon catcher" */

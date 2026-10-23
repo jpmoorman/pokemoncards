@@ -27,6 +27,10 @@ function apiRoute(route) {
   m = /^\/cards\/([^/]+)$/.exec(p);
   const f = m && path.join(fixtures, `card-${decodeURIComponent(m[1])}.json`);
   if (f && fs.existsSync(f)) return json(JSON.parse(fs.readFileSync(f)));
+  // Like the real API, every catalog card has details (identify.js looks up the best few
+  // candidates); those without a fixture have no attacks, HP or prices.
+  const card = m && catalog.cards.find((c) => c.id === decodeURIComponent(m[1]));
+  if (card) return json(card);
   return route.fulfill({ status: 404, headers: { 'access-control-allow-origin': '*' }, body: '{}' });
 }
 
