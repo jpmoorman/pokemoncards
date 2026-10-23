@@ -14,14 +14,18 @@
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
   <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/batch.css" />
+  <link rel="stylesheet" href="css/trade.css" />
 </head>
 <body>
   <header class="topbar">
     <h1>Card Scanner</h1>
     <nav class="tabs" role="tablist">
       <button class="tab active" data-view="scan" role="tab">Scan</button>
+      <button class="tab" data-view="batch" role="tab">Batch <span id="batch-count" class="badge" hidden></span></button>
+      <button class="tab" data-view="trade" role="tab">Trade</button>
       <button class="tab" data-view="search" role="tab">Search</button>
-      <button class="tab" data-view="collection" role="tab">Collection <span id="collection-count" class="badge" hidden></span></button>
+      <button class="tab" data-view="collection" role="tab">Saved <span id="collection-count" class="badge" hidden></span></button>
     </nav>
   </header>
 
@@ -31,10 +35,17 @@
       <div class="camera" id="camera">
         <video id="video" playsinline muted autoplay></video>
         <div class="guide-wrap"><div class="guide" id="guide"><span class="guide-hint">Fill this frame with the card</span></div></div>
+        <div class="camera-top">
+          <button class="mode-chip" id="btn-mode" type="button" aria-pressed="false">Batch mode: Off</button>
+        </div>
+        <div class="scan-target" id="scan-target" hidden>
+          <span id="scan-target-label"></span>
+          <button class="btn small" id="btn-target-done" type="button">Done</button>
+        </div>
         <div class="camera-off" id="camera-off">
           <p>Point your camera at a card.</p>
           <button class="btn primary" id="btn-start-camera">Start camera</button>
-          <p class="muted small">Or tap <b>Photo</b> to use your camera app or a saved picture.</p>
+          <p class="muted small">Or tap <b>Photo</b> to use your camera app, or <b>Library</b> to pick saved pictures (pick several to process them as a batch).</p>
         </div>
       </div>
       <div class="scan-controls">
@@ -43,20 +54,28 @@
           <input type="file" accept="image/*" capture="environment" id="file-input" hidden />
         </label>
         <button class="btn shutter" id="btn-scan" aria-label="Scan card" disabled><span></span></button>
-        <button class="btn" id="btn-torch" hidden>Light</button>
-        <label class="btn" title="Choose an existing picture">
+        <label class="btn" title="Choose existing pictures">
           Library
-          <input type="file" accept="image/*" id="file-input-library" hidden />
+          <input type="file" accept="image/*" id="file-input-library" multiple hidden />
         </label>
+        <button class="btn" id="btn-torch" hidden>Light</button>
       </div>
       <p class="status" id="scan-status" aria-live="polite"></p>
     </section>
 
+    <!-- BATCH (rendered by js/batch.js) -->
+    <section id="view-batch" class="view"></section>
+
+    <!-- TRADE (rendered by js/trade.js) -->
+    <section id="view-trade" class="view"></section>
+
     <!-- SEARCH -->
     <section id="view-search" class="view">
+      <p class="target-hint" id="search-target" hidden></p>
       <form class="search-form" id="search-form" autocomplete="off">
         <input type="search" id="q-name" placeholder="Card name, e.g. Charizard ex" enterkeyhint="search" />
-        <input type="text" id="q-number" placeholder="No. e.g. 125/197" inputmode="text" />
+        <input type="text" id="q-number" placeholder="No. e.g. 024/088" inputmode="text" />
+        <select id="q-set" aria-label="Set"><option value="">Any set</option></select>
         <button class="btn primary" type="submit">Search</button>
       </form>
       <p class="status" id="search-status"></p>
@@ -67,7 +86,7 @@
     <section id="view-collection" class="view">
       <div class="collection-head">
         <div>
-          <div class="muted small">Estimated total</div>
+          <div class="muted small">Estimated total (USD)</div>
           <div class="total" id="collection-total">$0.00</div>
         </div>
         <div class="row">
@@ -77,6 +96,7 @@
       </div>
       <ul class="collection" id="collection-list"></ul>
       <p class="muted center" id="collection-empty">No cards saved yet. Scan a card and tap <b>Add to collection</b>.</p>
+      <p class="center"><button class="btn small subtle" id="btn-clear-collection" type="button">Remove all</button></p>
     </section>
   </main>
 
@@ -91,9 +111,9 @@
           <span class="conf" id="confidence"></span>
         </div>
         <form id="clue-form" class="clue-form" autocomplete="off">
-          <label>Name <input id="clue-name" /></label>
-          <label>Number <input id="clue-number" placeholder="e.g. 125/197" /></label>
-          <label>Set code <input id="clue-set" placeholder="e.g. OBF" maxlength="4" /></label>
+          <label class="f-name">Name <input id="clue-name" /></label>
+          <label class="f-num">Number <input id="clue-number" placeholder="e.g. 024/088" /></label>
+          <label class="f-set">Set <select id="clue-set"><option value="">Any set</option></select></label>
           <button class="btn small" type="submit">Re-match</button>
         </form>
       </div>
@@ -115,7 +135,10 @@
   <template id="tpl-card-detail">
     <div class="detail">
       <div class="detail-top">
-        <img class="detail-img" alt="" />
+        <figure class="detail-fig">
+          <img class="detail-img" alt="" />
+          <figcaption class="img-note muted small"></figcaption>
+        </figure>
         <div class="detail-info">
           <h2 id="card-title" class="detail-name"></h2>
           <div class="detail-set"><img class="set-symbol" alt="" /><span class="set-name"></span></div>
@@ -127,14 +150,12 @@
         </div>
       </div>
       <h3 class="section-title">Version / markings</h3>
-      <p class="muted small hint">Pick the version that matches your card: 1st Edition stamp, reverse holo (shiny background), holo (shiny picture), promo stamps…</p>
+      <p class="muted small hint">Pick the version that matches your card: stamps (set logo, 1st Edition, promo), reverse holo (shiny background), holo or cosmos holo (shiny picture)… The picture changes to that version's marketplace photo.</p>
       <div class="chips variant-chips"></div>
       <div class="price-tables"></div>
       <div class="links"></div>
-      <div class="row actions">
-        <button class="btn primary add-btn">Add to collection</button>
-      </div>
-      <p class="muted small fine">Prices are for raw (ungraded) Near Mint copies. TCGplayer prices update about weekly, Cardmarket daily, via TCGdex. eBay links open recent <b>sold</b> listings so you can see real sale prices, including graded copies.</p>
+      <div class="actions"></div>
+      <p class="muted small fine">All prices in US dollars for raw (ungraded) Near Mint copies, via TCGdex. TCGplayer prices update about weekly; Cardmarket prices update daily and are converted from euros. eBay links open recent <b>sold</b> listings so you can see real sale prices, including graded copies.</p>
     </div>
   </template>
 

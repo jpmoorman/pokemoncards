@@ -369,6 +369,24 @@
    "id": "30th-c-001",
    "localId": "001",
    "name": "Charizard"
+  },
+  {
+   "id": "me03-024",
+   "localId": "024",
+   "name": "Aurorus",
+   "image": "https://assets.tcgdex.net/en/me/me03/024"
+  },
+  {
+   "id": "me03-023",
+   "localId": "023",
+   "name": "Amaura",
+   "image": "https://assets.tcgdex.net/en/me/me03/023"
+  },
+  {
+   "id": "me03-092",
+   "localId": "092",
+   "name": "Aurorus",
+   "image": "https://assets.tcgdex.net/en/me/me03/092"
   }
  ]
 }

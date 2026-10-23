@@ -43,7 +43,9 @@ export function parseBottomText(text) {
     const key = `${prefix}|${num}|${total}`;
     if (seen.has(key)) return;
     seen.add(key);
-    numbers.push({ prefix: prefix || '', num, total });
+    // `text` keeps leading zeros the way the card prints them ("024/088").
+    const text = `${prefix || ''}${fixDigits(rawNum)}${total != null ? `/${prefix || ''}${fixDigits(rawTotal)}` : ''}`;
+    numbers.push({ prefix: prefix || '', num, total, text });
   };
 
   // Subset numbers like TG05/TG30, GG12/GG70, SV045/SV122, RC5/RC32.

@@ -1,9 +1,10 @@
 // Offline support for the app shell. Network first so updates show up right away;
 // falls back to the cached copy when offline. API data is cached by the app itself.
-const CACHE = 'card-scanner-v1';
+const CACHE = 'card-scanner-v2';
 const SHELL = [
-  './', 'index.html', 'css/styles.css', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png',
-  'js/app.js', 'js/api.js', 'js/match.js', 'js/ocr.js', 'js/parse.js', 'js/prices.js',
+  './', 'index.html', 'css/styles.css', 'css/batch.css', 'css/trade.css', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png',
+  'js/app.js', 'js/api.js', 'js/batch.js', 'js/catalog.js', 'js/collection.js', 'js/components.js', 'js/entry.js', 'js/fx.js',
+  'js/identify.js', 'js/match.js', 'js/ocr.js', 'js/parse.js', 'js/prices.js', 'js/sheet.js', 'js/stamps.js', 'js/trade.js', 'js/ui.js',
 ];
 
 self.addEventListener('install', (e) => {

@@ -1,6 +1,19 @@
-// Turns a full TCGdex card into per-variant price rows plus marketplace links.
+// Turns a full TCGdex card into per-version price rows (all in USD) plus marketplace links.
 
 const TYPE_LABEL = { normal: 'Normal', holo: 'Holo', reverse: 'Reverse Holo' };
+
+// TCGdex stamp ids -> what's printed on the card.
+const STAMP_LABEL = {
+  '1st-edition': '1st Edition',
+  'set-logo': 'Set Logo Stamp',
+  'player-rewards-program': 'Play! Pokémon Stamp',
+  prerelease: 'Prerelease Stamp',
+  staff: 'Staff Stamp',
+  'pokemon-center': 'Pokémon Center Stamp',
+};
+
+// Used only if no exchange rate could be downloaded.
+export const FALLBACK_EUR_USD = 1.1;
 
 const titleCase = (s) =>
   String(s)
@@ -8,14 +21,21 @@ const titleCase = (s) =>
     .replace(/\b\w/g, (c) => c.toUpperCase())
     .replace(/\b1st\b/i, '1st');
 
-/** Human label for a TCGdex variants_detailed entry. */
+export function stampLabel(s) {
+  return STAMP_LABEL[s] || `${titleCase(s)} Stamp`;
+}
+
+/** Human label for a TCGdex variants_detailed entry, e.g. "1st Edition Shadowless Holo", "Cosmos Holo", "Set Logo Stamp". */
 export function variantLabel(v) {
   const parts = [];
   const stamps = v.stamp || [];
   if (stamps.includes('1st-edition')) parts.push('1st Edition');
   if (v.subtype && v.subtype !== 'unlimited') parts.push(titleCase(v.subtype));
-  parts.push(TYPE_LABEL[v.type] || titleCase(v.type || 'Normal'));
-  for (const s of stamps) if (s !== '1st-edition') parts.push(`${titleCase(s)} stamp`);
+  if (v.foil) parts.push(titleCase(v.foil));
+  const otherStamps = stamps.filter((s) => s !== '1st-edition');
+  // TCGdex files most stamped promos as "normal"; the stamp is what identifies them.
+  if (!(v.type === 'normal' && otherStamps.length && !v.foil)) parts.push(TYPE_LABEL[v.type] || titleCase(v.type || 'Normal'));
+  for (const s of otherStamps) parts.push(stampLabel(s));
   if (v.size && v.size !== 'standard') parts.push(`(${titleCase(v.size)})`);
   return parts.join(' ');
 }
@@ -38,7 +58,7 @@ function pickTcg(tcg, v) {
   return null;
 }
 
-/** Pick Cardmarket numbers; Cardmarket stores reverse holo prices in "-holo" fields. */
+/** Pick Cardmarket numbers (EUR); Cardmarket stores reverse holo prices in "-holo" fields. */
 function pickCm(cm, v, card) {
   if (!cm) return null;
   const useHolo = v.type === 'reverse' && cm['avg-holo'] != null;
@@ -50,8 +70,10 @@ function pickCm(cm, v, card) {
 }
 
 /**
- * Price rows for every printed variant of a card.
- * Returns [{ id, label, type, stamps, size, tcg: {market,low,mid,high,directLow,productId,updated}|null, cm: {...}|null }]
+ * Price rows for every printed version of a card.
+ * Returns [{ id, label, type, foil, stamps, size, tcgProductId, cmProductId,
+ *            tcg: {market,low,mid,high,directLow,productId,updated}|null (USD),
+ *            cm: {trend,avg,low,avg7,avg30,idProduct,updated}|null (EUR) }]
  */
 export function variantPrices(card) {
   const rows = [];
@@ -64,6 +86,7 @@ export function variantPrices(card) {
         id: `${v.variantId || 'v'}-${i}`,
         label: variantLabel(v),
         type: v.type,
+        foil: v.foil || null,
         stamps: v.stamp || [],
         size: v.size || 'standard',
         tcgProductId: v.thirdParty?.tcgplayer ?? tcg?.productId ?? null,
@@ -83,6 +106,7 @@ export function variantPrices(card) {
         id: k,
         label: variantLabel(v),
         type,
+        foil: null,
         stamps: v.stamp,
         size: 'standard',
         tcgProductId: tcg[k].productId ?? null,
@@ -93,7 +117,7 @@ export function variantPrices(card) {
     }
     if (!keys.length && card.pricing.cardmarket) {
       const v = { type: card.variants?.holo && !card.variants?.normal ? 'holo' : 'normal' };
-      rows.push({ id: 'cm', label: variantLabel(v), type: v.type, stamps: [], size: 'standard', tcgProductId: null, cmProductId: card.pricing.cardmarket.idProduct ?? null, tcg: null, cm: pickCm(card.pricing.cardmarket, v, card) });
+      rows.push({ id: 'cm', label: variantLabel(v), type: v.type, foil: null, stamps: [], size: 'standard', tcgProductId: null, cmProductId: card.pricing.cardmarket.idProduct ?? null, tcg: null, cm: pickCm(card.pricing.cardmarket, v, card) });
     }
   }
   // Standard-size cards first; jumbo oversize promos last.
@@ -112,29 +136,65 @@ function normTcg(t) {
   };
 }
 
-/** Best single headline value for a row: TCGplayer market (USD), else Cardmarket trend (EUR). */
-export function headlinePrice(row) {
+/** Convert a Cardmarket (EUR) number to USD. */
+export function eurToUsd(value, eurUsd = FALLBACK_EUR_USD) {
+  return value == null ? null : Math.round(value * eurUsd * 100) / 100;
+}
+
+/**
+ * Best single value for a row, always in USD:
+ * TCGplayer market, else Cardmarket trend converted from EUR.
+ * Returns { value, currency: 'USD', source, converted, original?: { value, currency: 'EUR' } } or null.
+ */
+export function headlinePrice(row, eurUsd = FALLBACK_EUR_USD) {
   if (!row) return null;
   const usd = row.tcg?.market ?? row.tcg?.mid ?? row.tcg?.low;
-  if (usd != null) return { value: usd, currency: 'USD', source: 'TCGplayer market' };
+  if (usd != null) return { value: usd, currency: 'USD', source: 'TCGplayer market', converted: false };
   const eur = row.cm?.trend || row.cm?.avg || row.cm?.low;
-  if (eur != null) return { value: eur, currency: 'EUR', source: 'Cardmarket trend' };
+  if (eur != null) {
+    return { value: eurToUsd(eur, eurUsd), currency: 'USD', source: 'Cardmarket trend', converted: true, original: { value: eur, currency: 'EUR' } };
+  }
   return null;
+}
+
+/** Bring a stored price (possibly saved in EUR by an older version) to USD. */
+export function priceInUsd(price, eurUsd = FALLBACK_EUR_USD) {
+  if (!price || price.value == null) return null;
+  if (price.currency === 'EUR') return eurToUsd(price.value, eurUsd);
+  return price.value;
 }
 
 export function formatMoney(value, currency = 'USD') {
   if (value == null || Number.isNaN(value)) return '—';
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
+}
+
+/**
+ * Collector number the way it's printed on the card: "024/088", "125/197", "4/102", "TG05".
+ * Modern cards pad the set size to the same width as the card number.
+ */
+export function printedNumber(card) {
+  const official = card?.set?.cardCount?.official ?? card?.official;
+  const id = String(card?.localId ?? card?.number ?? '');
+  if (!/^\d+$/.test(id) || !official) return id;
+  return `${id}/${String(official).padStart(id.length, '0')}`;
+}
+
+/** Marketplace photo of this exact printing (stamped/cosmos versions differ), else the TCGdex scan. */
+export function variantImage(card, row) {
+  if (row?.tcgProductId) return { src: `https://tcgplayer-cdn.tcgplayer.com/product/${row.tcgProductId}_in_1000x1000.jpg`, source: 'tcgplayer' };
+  if (card?.image) return { src: `${card.image}/high.webp`, source: 'tcgdex' };
+  return null;
 }
 
 /** Search query used for eBay / PriceCharting: "Charizard ex 125/197 Obsidian Flames". */
 export function searchQuery(card, row) {
-  const official = card.set?.cardCount?.official;
-  const num = /^\d+$/.test(card.localId) && official ? `${card.localId}/${String(official).padStart(String(card.localId).length, '0')}` : card.localId;
   const extras = [];
   if (row?.stamps?.includes('1st-edition')) extras.push('1st Edition');
+  if (row?.foil) extras.push(titleCase(row.foil));
   if (row?.type === 'reverse') extras.push('Reverse Holo');
-  return [card.name, num, card.set?.name, ...extras].filter(Boolean).join(' ');
+  if (row?.stamps?.some((s) => s !== '1st-edition')) extras.push('Stamped');
+  return [card.name, printedNumber(card), card.set?.name, ...extras].filter(Boolean).join(' ');
 }
 
 export function marketLinks(card, row) {

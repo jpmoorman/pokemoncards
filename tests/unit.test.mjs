@@ -3,23 +3,30 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parseBottomText, pickName, cleanNameLine } from '../js/parse.js';
 import { buildIndex, rankCandidates, partialSimilarity, parseLocalId, manualSearch, confidence } from '../js/match.js';
-import { variantPrices, headlinePrice, marketLinks, searchQuery } from '../js/prices.js';
+import { variantPrices, headlinePrice, marketLinks, searchQuery, printedNumber, variantImage, eurToUsd, priceInUsd, variantLabel } from '../js/prices.js';
 
 const fx = (f) => JSON.parse(fs.readFileSync(new URL(`./fixtures/${f}`, import.meta.url)));
 const catalog = fx('catalog.json');
 const index = buildIndex(catalog.cards, catalog.sets);
+const num = (n) => n && { prefix: n.prefix, num: n.num, total: n.total };
 const top = (clues) => rankCandidates(index, { nameBest: '', nameAll: '', numbers: [], setCodes: [], codeCandidates: [], ...clues }, catalog.abbr)[0]?.card.id;
+
+test('number keeps printed zeros', () => {
+  assert.equal(parseBottomText('POR EN 024/088').numbers[0].text, '024/088');
+  assert.equal(parseBottomText('4/102').numbers[0].text, '4/102');
+  assert.equal(parseBottomText('TG05/TG30').numbers[0].text, 'TG05/TG30');
+});
 
 test('parses modern bottom line with set code', () => {
   const r = parseBottomText('G OBF EN 125/197 ★\nIllus. 5ban Graphics');
-  assert.deepEqual(r.numbers[0], { prefix: '', num: 125, total: 197 });
+  assert.deepEqual(num(r.numbers[0]), { prefix: '', num: 125, total: 197 });
   assert.deepEqual(r.setCodes, ['OBF']);
 });
 
 test('parses vintage number and OCR digit confusions', () => {
-  assert.deepEqual(parseBottomText('Illus. Mitsuhiro Arita  4/102 ●').numbers[0], { prefix: '', num: 4, total: 102 });
-  assert.deepEqual(parseBottomText('l25/I97').numbers[0], { prefix: '', num: 125, total: 197 });
-  assert.deepEqual(parseBottomText('125 / 197').numbers[0], { prefix: '', num: 125, total: 197 });
+  assert.deepEqual(num(parseBottomText('Illus. Mitsuhiro Arita  4/102 ●').numbers[0]), { prefix: '', num: 4, total: 102 });
+  assert.deepEqual(num(parseBottomText('l25/I97').numbers[0]), { prefix: '', num: 125, total: 197 });
+  assert.deepEqual(num(parseBottomText('125 / 197').numbers[0]), { prefix: '', num: 125, total: 197 });
 });
 
 test('ignores copyright years and attack text', () => {
@@ -28,8 +35,8 @@ test('ignores copyright years and attack text', () => {
 });
 
 test('parses trainer gallery and promo numbers', () => {
-  assert.deepEqual(parseBottomText('TG05/TG30').numbers[0], { prefix: 'TG', num: 5, total: 30 });
-  assert.deepEqual(parseBottomText('SWSH050').numbers[0], { prefix: 'SWSH', num: 50, total: null });
+  assert.deepEqual(num(parseBottomText('TG05/TG30').numbers[0]), { prefix: 'TG', num: 5, total: 30 });
+  assert.deepEqual(num(parseBottomText('SWSH050').numbers[0]), { prefix: 'SWSH', num: 50, total: null });
 });
 
 test('cleans name lines', () => {
@@ -109,8 +116,8 @@ test('variant prices: holo-only modern card', () => {
   assert.equal(rows[0].label, 'Holo');
   assert.equal(rows[0].tcg.market, 5.28);
   assert.equal(rows.at(-1).size, 'jumbo');
-  assert.ok(rows.some((r) => r.label === 'Holo Player Rewards Program stamp'));
-  assert.deepEqual(headlinePrice(rows[0]), { value: 5.28, currency: 'USD', source: 'TCGplayer market' });
+  assert.ok(rows.some((r) => r.label === 'Holo Play! Pokémon Stamp'));
+  assert.deepEqual(headlinePrice(rows[0], 1.12), { value: 5.28, currency: 'USD', source: 'TCGplayer market', converted: false });
 });
 
 test('variant prices: normal vs reverse holo', () => {
@@ -127,9 +134,10 @@ test('variant prices: 1st edition / shadowless base set', () => {
   const card = fx('card-base1-4.json');
   const rows = variantPrices(card);
   assert.deepEqual(rows.map((r) => r.label), ['Holo', '1st Edition Shadowless Holo', 'Shadowless Holo', '1999 2000 Copyright Holo']);
-  assert.equal(headlinePrice(rows[0]).value, 954.65);
-  assert.deepEqual(headlinePrice(rows[1]), { value: 3330.71, currency: 'EUR', source: 'Cardmarket trend' });
-  assert.equal(headlinePrice(rows[3]), null);
+  assert.equal(headlinePrice(rows[0], 1.12).value, 954.65);
+  // Cardmarket-only versions are converted to USD.
+  assert.deepEqual(headlinePrice(rows[1], 1.12), { value: 3730.4, currency: 'USD', source: 'Cardmarket trend', converted: true, original: { value: 3330.71, currency: 'EUR' } });
+  assert.equal(headlinePrice(rows[3], 1.12), null);
   assert.equal(searchQuery(card, rows[1]), 'Charizard 4/102 Base Set 1st Edition');
   const links = marketLinks(card, rows[0]);
   assert.equal(links.tcgplayer, 'https://www.tcgplayer.com/product/42382');
@@ -144,7 +152,7 @@ test('search query pads number like the card print', () => {
 test('30th Celebration: digit set code, OCR O/0 mix-up', () => {
   const r = parseBottomText('I 30C EN 157/128 ★');
   assert.deepEqual(r.setCodes, ['30C']);
-  assert.deepEqual(r.numbers[0], { prefix: '', num: 157, total: 128 });
+  assert.deepEqual(num(r.numbers[0]), { prefix: '', num: 157, total: 128 });
   assert.equal(top({ nameBest: 'Mewtwo ex', numbers: [{ prefix: '', num: 157, total: 128 }], setCodes: ['3OC'] }), '30th-157');
   assert.equal(top({ numbers: [{ prefix: '', num: 157, total: null }], setCodes: ['30C'] }), '30th-157');
 });
@@ -159,4 +167,51 @@ test('brand-new card without prices yet', () => {
   assert.equal(rows.length, 1);
   assert.equal(headlinePrice(rows[0]), null);
   assert.match(marketLinks(fx('card-30th-157.json'), rows[0]).ebaySold, /Mewtwo%20ex%20157%2F128%2030th%20Celebration/);
+});
+
+test('Perfect Order Aurorus: stamped and cosmos versions', () => {
+  const card = fx('card-me03-024.json');
+  const rows = variantPrices(card);
+  assert.deepEqual(rows.map((r) => r.label), ['Holo', 'Reverse Holo', 'Set Logo Stamp', 'Cosmos Holo']);
+  assert.equal(headlinePrice(rows[0], 1.12).value, 0.15);
+  assert.equal(headlinePrice(rows[1], 1.12).value, 0.24);
+  assert.equal(headlinePrice(rows[2], 1.12).value, 32.04); // €28.61 trend
+  assert.equal(headlinePrice(rows[3], 1.12).value, 28); // €25 trend
+  // Each version shows its own marketplace photo.
+  assert.equal(variantImage(card, rows[2]).src, 'https://tcgplayer-cdn.tcgplayer.com/product/685559_in_1000x1000.jpg');
+  assert.equal(variantImage(card, rows[3]).src, 'https://tcgplayer-cdn.tcgplayer.com/product/709694_in_1000x1000.jpg');
+  assert.equal(variantImage(card, { tcgProductId: null }).src, 'https://assets.tcgdex.net/en/me/me03/024/high.webp');
+  assert.equal(searchQuery(card, rows[2]), 'Aurorus 024/088 Perfect Order Stamped');
+  assert.equal(marketLinks(card, rows[2]).tcgplayer, 'https://www.tcgplayer.com/product/685559');
+});
+
+test('printed number matches the card', () => {
+  assert.equal(printedNumber(fx('card-me03-024.json')), '024/088');
+  assert.equal(printedNumber(fx('card-base1-4.json')), '4/102');
+  assert.equal(printedNumber({ localId: 'TG05', official: 30 }), 'TG05');
+  assert.equal(printedNumber({ localId: '157', set: { cardCount: { official: 128 } } }), '157/128');
+});
+
+test('currency helpers', () => {
+  assert.equal(eurToUsd(25, 1.12), 28);
+  assert.equal(priceInUsd({ value: 10, currency: 'EUR' }, 1.1), 11);
+  assert.equal(priceInUsd({ value: 10, currency: 'USD' }, 1.1), 10);
+  assert.equal(priceInUsd(null), null);
+  assert.equal(variantLabel({ type: 'normal', stamp: ['prerelease'] }), 'Prerelease Stamp');
+  assert.equal(variantLabel({ type: 'holo', stamp: ['set-logo'] }), 'Holo Set Logo Stamp');
+});
+
+test('explicit set choice limits results', () => {
+  const r = rankCandidates(index, { nameBest: 'Charizard ex', nameAll: '', numbers: [], setCodes: [], codeCandidates: [], setIds: ['sv03.5'] }, catalog.abbr);
+  assert.ok(r.length >= 2 && r.every((x) => x.card.setId === 'sv03.5'));
+  const all = rankCandidates(index, { nameBest: '', nameAll: '', numbers: [], setCodes: [], codeCandidates: [], setIds: ['me03'] }, catalog.abbr);
+  assert.equal(all[0].card.id, 'me03-012');
+  assert.ok(all.every((x) => x.card.setId === 'me03'));
+  assert.equal(manualSearch(index, '', '24', catalog.abbr, 'me03')[0].card.id, 'me03-024');
+});
+
+test('Aurorus from the real photo clues', () => {
+  assert.equal(top({ nameBest: 'Aurorus', numbers: [{ prefix: '', num: 24, total: 88 }], setCodes: ['POR'] }), 'me03-024');
+  // "024/O88" style misread still works through digit fixing.
+  assert.deepEqual(num(parseBottomText('J POR EN 024/O88 ★').numbers[0]), { prefix: '', num: 24, total: 88 });
 });

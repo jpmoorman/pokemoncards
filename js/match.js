@@ -97,6 +97,8 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
   const abbrOf = (setId) => (setAbbr instanceof Map ? setAbbr.get(setId) : setAbbr[setId]) || null;
   const codes = new Set((clues.setCodes || []).map(codeKey));
   const looseCodes = new Set((clues.codeCandidates || []).map(codeKey));
+  // Sets the user picked explicitly; results are limited to them when any match.
+  const setIds = new Set(clues.setIds || []);
   const nameBest = clues.nameBest || '';
   const nameAll = clues.nameAll || '';
   const hasName = !!(nameBest || nameAll);
@@ -115,7 +117,10 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
     const set = index.setsById.get(card.setId);
     let s = 0;
     const abbr = abbrOf(card.setId);
-    if (abbr && codes.has(codeKey(abbr))) {
+    if (setIds.has(card.setId)) {
+      s += 5;
+      reasons.push('chosen set');
+    } else if (abbr && codes.has(codeKey(abbr))) {
       s += 4;
       reasons.push(`set code ${abbr}`);
     } else if (abbr && looseCodes.has(codeKey(abbr))) {
@@ -187,7 +192,21 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
     }
   }
 
-  return [...results.values()]
+  let out = [...results.values()];
+  if (setIds.size) {
+    const inSet = out.filter((r) => setIds.has(r.card.setId));
+    if (inSet.length) out = inSet;
+    else if (!hasName && !(clues.numbers || []).length) out = [];
+  }
+  // A set picked with nothing else: list that set's cards in number order.
+  if (setIds.size && !hasName && !(clues.numbers || []).length) {
+    return index.entries
+      .filter((c) => setIds.has(c.setId))
+      .sort((a, b) => (a.num ?? 1e9) - (b.num ?? 1e9) || String(a.localId).localeCompare(String(b.localId)))
+      .slice(0, limit)
+      .map((card) => ({ card, set: index.setsById.get(card.setId), score: 1, reasons: ['chosen set'] }));
+  }
+  return out
     .sort((a, b) => b.score - a.score || b.set.order - a.set.order)
     .slice(0, limit);
 }
@@ -203,8 +222,8 @@ export function confidence(ranked) {
 }
 
 /** Manual search: name text and/or number like "125", "125/197", "TG05". */
-export function manualSearch(index, nameQuery, numberQuery, setAbbr = {}) {
-  const clues = { nameBest: nameQuery || '', nameAll: '', numbers: [], setCodes: [], codeCandidates: [] };
+export function manualSearch(index, nameQuery, numberQuery, setAbbr = {}, setId = '') {
+  const clues = { nameBest: nameQuery || '', nameAll: '', numbers: [], setCodes: [], codeCandidates: [], setIds: setId ? [setId] : [] };
   const q = (numberQuery || '').trim().toUpperCase();
   if (q) {
     const m = /^([A-Z]*)\s*(\d{1,3})\s*(?:\/\s*[A-Z]*\s*(\d{1,3}))?$/.exec(q);
@@ -221,6 +240,7 @@ export function manualSearch(index, nameQuery, numberQuery, setAbbr = {}) {
         for (const card of group.cards) {
           if (have.has(card.id)) continue;
           if (clues.numbers.length && !clues.numbers.some((n) => n.num === card.num)) continue;
+          if (setId && card.setId !== setId) continue;
           ranked.push({ card, set: index.setsById.get(card.setId), score: 2 + nq.length / key.length, reasons: ['name contains'] });
         }
       }
