@@ -5,7 +5,7 @@
 // The current trade is kept on the device in localStorage ('trade.v1'). Lines are saved
 // entries (see entry.js) plus pricedAt: when the card data their price comes from was
 // downloaded (ms). Collection and Batch entries don't have it; their price may be months old.
-import { $, el, on, toast, confirmDialog, navigate } from './ui.js';
+import { $, el, on, emit, toast, confirmDialog, navigate } from './ui.js';
 import { getCard, cardFetchedAt } from './api.js';
 import { formatMoney } from './prices.js';
 import { makeEntry, entryKey, refreshEntry, unitUsd, totalUsd, entryNumber } from './entry.js';
@@ -76,13 +76,15 @@ function load() {
   }
 }
 
-function commit() {
+/** Save and redraw, then tell other views ('trade:changed', see ui.js) what changed. */
+function commit(change = {}) {
   try {
     localStorage.setItem(KEY, JSON.stringify({ give: trade.give, get: trade.get, updated: Date.now() }));
   } catch {
     toast('Could not save the trade — phone storage is full');
   }
   renderTrade();
+  emit('trade:changed', change);
 }
 
 // ---------------- changes ----------------
@@ -140,7 +142,7 @@ function replaceLine(side, key, e) {
   } else {
     list[i] = next;
   }
-  commit();
+  commit({ side, from: key, to: entryKey(next) });
 }
 
 function changeQty(side, e, delta) {
@@ -222,7 +224,7 @@ function onCardAction(detail) {
 function swapSides() {
   trade = { give: trade.get, get: trade.give };
   if (pendingUndo) pendingUndo.side = OTHER[pendingUndo.side]; // the removed card belongs with its old list
-  commit();
+  commit({ swapped: true });
   toast('Sides swapped');
 }
 

@@ -19,8 +19,11 @@ const state = {
   batchMode: false,
   resumeBatch: false, // batch mode was on before adding cards to a trade
   tradeSide: null, // 'give' | 'get' while scanning cards for a trade
-  ready: null, // a finished scan not shown yet: { ranked, clues, debug, opts }
+  ready: null, // a finished scan not shown yet: { ranked, clues, debug, opts, at }
+  offer: null, // its "Scan ready · View" toast
 };
+
+const READY_MS = 3 * 60 * 1000; // a scan not looked at is dropped after this
 
 const VIEWS = ['scan', 'batch', 'trade', 'search', 'collection'];
 
@@ -106,7 +109,7 @@ function showView(name) {
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   if (name === 'scan') {
     if (state.wantCamera) openCamera();
-    if (state.ready && $('#sheet').hidden) showScan(state.ready);
+    if (readyScan() && $('#sheet').hidden) showOrOffer(state.ready);
   } else {
     closeCamera();
   }
@@ -158,6 +161,8 @@ function updateModeButton() {
 }
 
 function setTradeSide(side) {
+  // Scanning cards for a trade starts afresh: an earlier scan not looked at isn't for it.
+  if (side && state.ready && state.ready.opts.tradeSide !== side) dropReady();
   if (side && !state.tradeSide) {
     // Cards for a trade are identified one by one; batch mode comes back afterwards.
     state.resumeBatch = state.batchMode;
@@ -238,7 +243,8 @@ async function onFiles(e) {
 
 async function runScan(canvas) {
   state.busy = true;
-  state.ready = null;
+  dropReady(); // a new scan replaces one not looked at
+  emit('scan:busy', { busy: true }); // Batch processing waits between photos meanwhile
   const opts = { tradeSide: state.tradeSide, owner: 'scan' };
   $('#guide').classList.add('busy');
   $('#btn-scan').disabled = true;
@@ -251,39 +257,62 @@ async function runScan(canvas) {
     setStatus('#scan-status', `Scan failed: ${e.message}`, true);
   } finally {
     state.busy = false;
+    emit('scan:busy', { busy: false });
     $('#guide').classList.remove('busy');
     $('#btn-scan').disabled = !state.stream;
   }
 }
 
 const scanActive = () => $('#view-scan').classList.contains('active');
+// Taken in the scanner's current mode (single, or adding cards to that side of a trade)?
+const sameMode = (res) => (res.opts.tradeSide || null) === (state.tradeSide || null);
 
-/** Show a finished scan, unless the user moved on (another tab or another sheet): then keep it and offer it. */
+/** Show a finished scan, unless the user moved on (another tab, sheet or scanner mode): then keep it and offer it. */
 function deliver(res) {
-  if (scanActive() && $('#sheet').hidden) return showScan(res);
+  res.at = Date.now();
+  if (scanActive() && $('#sheet').hidden && sameMode(res)) return showScan(res);
   state.ready = res;
   offerScan(); // and again when the sheet in the way closes
 }
 
-function showScan(res) {
+/** The scan waiting to be looked at, if any; after a few minutes it is dropped. */
+function readyScan() {
+  if (state.ready && Date.now() - state.ready.at > READY_MS) dropReady();
+  return state.ready;
+}
+
+function dropReady() {
   state.ready = null;
+  state.offer?.close();
+  state.offer = null;
+}
+
+/** On the Scan tab: open the waiting scan by itself only in the mode it was taken in, else offer it. */
+function showOrOffer(res) {
+  if (sameMode(res)) showScan(res);
+  else offerScan();
+}
+
+function showScan(res) {
+  dropReady();
   showResults(res.ranked, res.clues, res.debug, res.opts);
 }
 
 function offerScan() {
-  const name = state.ready.ranked[0]?.card.name;
-  actionToast(name ? `Scan ready: ${name}` : 'Scan finished', 'View', () => {
-    const res = state.ready;
-    if (!res) return;
-    state.ready = null; // before closing a sheet, so closing doesn't offer it again
+  const res = state.ready;
+  const name = res.ranked[0]?.card.name;
+  state.offer?.close();
+  state.offer = actionToast(name ? `Scan ready: ${name}` : 'Scan finished', 'View', () => {
+    if (state.ready !== res) return; // dropped meanwhile
+    dropReady(); // before closing a sheet, so closing doesn't offer it again
     if (!$('#sheet').hidden) closeSheet();
     showScan(res);
   }, { ms: 8000 });
 }
 
 on('sheet:closed', () => {
-  if (state.ready) {
-    if (scanActive()) showScan(state.ready);
+  if (readyScan()) {
+    if (scanActive()) showOrOffer(state.ready);
     else offerScan();
     return;
   }

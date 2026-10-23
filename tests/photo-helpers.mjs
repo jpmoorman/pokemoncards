@@ -16,7 +16,7 @@ export const PHOTO_DEFAULTS = {
   tilt: 0, // degrees the card is tipped back (top farther from the camera), 0–20
   offset: { x: 0, y: 0 }, // card centre shift, fraction of photo size
   toploader: false,
-  sticker: false, // white "$25" price sticker over the top-right corner
+  sticker: false, // white "$25" price sticker over the top-right corner ('name': over the name)
   glare: null, // { at: 0..1 along the card, angle: deg, strength: 0..1, width: fraction }
   blur: 0.6, // px, applied to the whole photo
   quality: 0.82,
@@ -147,7 +147,8 @@ async function renderPhoto({ o, cardPng }) {
     }
     if (o.sticker) {
       s.save();
-      s.translate(mx + CW * 0.86, my + CH * 0.03);
+      if (o.sticker === 'name') s.translate(mx + CW * 0.3, my + CH * 0.07);
+      else s.translate(mx + CW * 0.86, my + CH * 0.03);
       s.rotate(-0.03);
       s.shadowColor = 'rgba(0,0,0,0.25)';
       s.shadowBlur = 8;

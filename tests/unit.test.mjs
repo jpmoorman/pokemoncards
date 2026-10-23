@@ -215,3 +215,28 @@ test('Aurorus from the real photo clues', () => {
   // "024/O88" style misread still works through digit fixing.
   assert.deepEqual(num(parseBottomText('J POR EN 024/O88 ★').numbers[0]), { prefix: '', num: 24, total: 88 });
 });
+
+test('card details: callers asking at once share one download', async () => {
+  // No IndexedDB in Node: api.js runs without its on-device copy.
+  const { getCard } = await import('../js/api.js');
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    await new Promise((r) => setTimeout(r, 30));
+    return new Response(JSON.stringify({ id: 'xx1-7', name: 'Test card' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    // identify() starts the download for its best match; the result sheet then asks too.
+    const [a, b] = await Promise.all([getCard('xx1-7'), getCard('xx1-7')]);
+    assert.equal(asked.length, 1);
+    assert.equal(a.name, 'Test card');
+    assert.equal(b, a);
+    // Done downloading: kept, and Refresh prices downloads again.
+    assert.equal(await getCard('xx1-7'), a);
+    await getCard('xx1-7', { fresh: true });
+    assert.equal(asked.length, 2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

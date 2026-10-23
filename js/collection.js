@@ -2,6 +2,7 @@
 import { $, el, on, toast, confirmDialog } from './ui.js';
 import { formatMoney } from './prices.js';
 import { entryKey, refreshEntry, totalUsd, unitUsd, entryNumber } from './entry.js';
+import { getCard, cardFetchedAt } from './api.js';
 import { entryRow } from './components.js';
 import { openCard } from './sheet.js';
 
@@ -78,11 +79,16 @@ export function initCollection() {
     if (!items.length) return;
     const btn = $('#btn-refresh-prices');
     btn.disabled = true;
-    const prices = new Map();
-    for (const [n, i] of items.entries()) {
-      btn.textContent = `Refreshing ${n + 1}/${items.length}…`;
-      prices.set(entryKey(i), (await refreshEntry(i)).price);
+    // Download every card again (once per card), even one looked up minutes ago.
+    const started = Date.now();
+    const ids = [...new Set(items.map((i) => i.id))];
+    for (const [n, id] of ids.entries()) {
+      btn.textContent = `Refreshing ${n + 1}/${ids.length}…`;
+      await getCard(id, { fresh: true }).catch(() => null);
     }
+    // Cards that couldn't be downloaded keep the price they have.
+    const prices = new Map();
+    for (const i of items) if (cardFetchedAt(i.id) >= started) prices.set(entryKey(i), (await refreshEntry(i)).price);
     // Cards may have been added or changed meanwhile (Batch, a scan, −/+): only update prices.
     const all = loadCollection();
     for (const it of all) if (prices.has(entryKey(it))) it.price = prices.get(entryKey(it));
@@ -90,7 +96,10 @@ export function initCollection() {
     renderCollection();
     btn.disabled = false;
     btn.textContent = 'Refresh prices';
-    toast('Prices updated');
+    const done = items.filter((i) => prices.has(entryKey(i))).length;
+    if (done === items.length) toast('Prices updated');
+    else if (done) toast(`Updated ${done} of ${items.length} cards — couldn't reach the price server for the rest`, 4000);
+    else toast("Couldn't reach the price server — prices not updated", 4000);
   });
 
   $('#btn-export').addEventListener('click', () => {

@@ -15,7 +15,8 @@
 //   entry    - entry.makeEntry() of the chosen card + version
 //   alts     - [{ id, score }] ranked matches (top first) so the review sheet works after a restart
 //   check    - low/medium confidence; cleared once the user reviews the item
-//   saved    - added to the collection; traded - side it was sent to ('give' | 'get')
+//   saved    - added to the collection; traded - side it was sent to ('give' | 'get'), kept in step with Swap sides
+//   tradeKey - entryKey of its trade line when that line's version was changed on the Trade tab
 //   forTrade - side it was photographed for (Scan in "Adding cards to" mode), until it is sent
 import { $, el, emit, on, toast, actionToast, confirmDialog, navigate } from './ui.js';
 import { kvGet, getCard } from './api.js';
@@ -40,7 +41,7 @@ const ALTS = 13; // best match + the 12 alternates the sheet shows
 const SIDES = { give: 'You give', get: 'You get' };
 
 let items = [];
-let loaded = false;
+let loadState = 'loading'; // 'loading' | 'ok' | 'failed' (the saved list couldn't be read)
 let loadP = Promise.resolve();
 const thumbs = new Map(); // item id -> object URL of its thumbnail
 const run = { active: false, stop: false, index: 0, total: 0, msg: '' };
@@ -50,8 +51,10 @@ let gen = 0; // bumped by Clear all, so saves and undos started before it are dr
 const isPending = (it) => it.status === 'waiting' || it.status === 'error';
 const needsCheck = (it) => it.status === 'nomatch' || (it.status === 'matched' && it.check && !it.reviewed);
 const find = (id) => items.find((i) => i.id === id);
+// The trade line a sent item went into: its own card + version, unless the line's version was changed on the Trade tab.
+const tradeKey = (it) => it.tradeKey || entryKey(it.entry);
 // Sent to the trade and still there (the trade may have been cleared since).
-const isTraded = (it) => !!it.traded && !!it.entry && inTrade(entryKey(it.entry));
+const isTraded = (it) => !!it.traded && !!it.entry && inTrade(tradeKey(it));
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 export function batchCount() {
@@ -63,16 +66,13 @@ function changed() {
 }
 
 export function initBatch() {
-  loadP = kvGet(INDEX)
-    .catch(() => null)
-    .then((saved) => {
-      // A photo that was mid-way when the app closed goes back in the queue.
-      items = (Array.isArray(saved) ? saved : []).filter((i) => i?.id).map((i) => (i.status === 'processing' ? { ...i, status: 'waiting' } : i));
-      loaded = true;
-      changed();
-      render();
-      dropOrphans();
-    });
+  loadP = load().catch((e) => {
+    // Show that the batch couldn't be opened rather than an empty one; nothing is deleted or overwritten.
+    console.warn(e);
+    loadState = 'failed';
+    changed();
+    render();
+  });
   on('sheet:closed', () => (reviewing = null));
   on('card:action', ({ action, entry, owner }) => {
     // A button in this item's own review sheet: remember it so the bulk buttons don't repeat it.
@@ -84,6 +84,20 @@ export function initBatch() {
     persist();
     render();
   });
+  // The trade changes after these listeners ran, or on the Trade tab: redraw the "In trade" tags and counts.
+  on('trade:changed', ({ side, from, to, swapped }) => {
+    let moved = false;
+    for (const it of items) {
+      if (!it.traded) continue;
+      if (swapped) it.traded = it.traded === 'give' ? 'get' : 'give';
+      else if (from && it.traded === side && it.entry && tradeKey(it) === from) it.tradeKey = to === entryKey(it.entry) ? undefined : to;
+      else continue;
+      moved = true;
+    }
+    if (moved) persist();
+    renderSoon();
+  });
+  on('scan:busy', scanBusy);
   document.addEventListener('visibilitychange', () => !document.hidden && run.active && keepAwake(true));
 }
 
@@ -133,6 +147,55 @@ async function tx(fn) {
   });
 }
 
+/** Read the saved list; unlike kvGet, a failed read rejects instead of looking like "no batch". */
+async function readIndex() {
+  const d = await idb();
+  return new Promise((resolve, reject) => {
+    try {
+      const req = d.transaction('kv').objectStore('kv').get(INDEX);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('storage error'));
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+/**
+ * Load the saved list (a few tries, on a new connection each time). Until it has been read,
+ * nothing may write it or clean up photos: that would replace or delete the saved batch.
+ */
+let loading = null;
+function load() {
+  if (loadState === 'ok') return Promise.resolve();
+  if (!loading) {
+    const attempt = (n) =>
+      readIndex().catch((e) => {
+        dbP?.then((d) => d.close(), () => {});
+        dbP = null;
+        if (n >= 2) throw e;
+        return new Promise((r) => setTimeout(r, 300 * (n + 1))).then(() => attempt(n + 1));
+      });
+    loading = attempt(0)
+      .then((saved) => {
+        // A photo that was mid-way when the app closed goes back in the queue.
+        items = (Array.isArray(saved) ? saved : []).filter((i) => i?.id).map((i) => (i.status === 'processing' ? { ...i, status: 'waiting' } : i));
+        loadState = 'ok';
+        changed();
+        render();
+        if (Array.isArray(saved)) dropOrphans(); // only against a list that was really read
+      })
+      .finally(() => (loading = null));
+  }
+  return loading;
+}
+
+function unreadable() {
+  const e = new Error("Couldn't open the batch saved on this phone, so the photo wasn't added (nothing was deleted). Close the app completely, open it again and retry.");
+  e.unreadable = true;
+  return e;
+}
+
 // Writes run one after another so the saved list always matches the saved photos.
 let writing = Promise.resolve();
 function queued(fn) {
@@ -143,6 +206,7 @@ function queued(fn) {
 
 let indexQueued = null;
 function persist() {
+  if (loadState !== 'ok') return Promise.resolve(); // never replace a saved list that wasn't read
   if (!indexQueued) {
     indexQueued = queued(() => {
       indexQueued = null;
@@ -174,9 +238,11 @@ function saveFailed(e) {
   if (alerting) return;
   alerting = true;
   const full = /quota|space/i.test(`${e?.name} ${e?.message}`);
-  const msg = full
-    ? 'Your phone is out of space for batch photos. Process the photos you have, add them to your collection, tap Clear done, then try again.'
-    : `Couldn't save the photo on this phone (${e?.message || e}). In a private browsing window photos can't be kept.`;
+  const msg = e?.unreadable
+    ? e.message
+    : full
+      ? 'Your phone is out of space for batch photos. Process the photos you have, add them to your collection, tap Clear done, then try again.'
+      : `Couldn't save the photo on this phone (${e?.message || e}). In a private browsing window photos can't be kept.`;
   dialog(msg, [{ label: 'OK', value: true, primary: true }]).then(() => (alerting = false));
 }
 
@@ -214,6 +280,8 @@ function thumbnail(canvas) {
 async function addPhoto(canvas, source, forTrade, g = gen) {
   const [blob, thumb] = await Promise.all([jpeg(canvas, 0.9), thumbnail(canvas)]);
   await loadP;
+  // The write below replaces the saved list, so it must have been read: try again, else refuse.
+  if (loadState !== 'ok') await load().catch(() => Promise.reject(unreadable()));
   const it = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, added: Date.now(), source, status: 'waiting' };
   if (forTrade) it.forTrade = forTrade;
   let kept = false;
@@ -383,6 +451,12 @@ async function processAll(only) {
   let found = 0;
   let failed = 0;
   for (let it = untried()[0]; it && !run.stop; it = untried()[0]) {
+    if (scanDone) {
+      // A scan on the Scan tab goes first (text recognition is shared); the list may change meanwhile.
+      progress('Paused while your scan finishes…');
+      await scanDone;
+      continue;
+    }
     tried.add(it.id);
     run.index = tried.size;
     run.total = tried.size + untried().length;
@@ -402,6 +476,17 @@ async function processAll(only) {
   const check = items.filter((i) => needsCheck(i) && !before.has(i.id)).length;
   const parts = [`${found} identified`, check && `${check} to check`, failed && `${failed} failed`].filter(Boolean);
   toast(`${stopped ? 'Stopped' : 'Done'}: ${parts.join(', ')}`, 3000);
+}
+
+// Resolves when the scan running on the Scan tab ('scan:busy') is done; null while none runs.
+let scanDone = null;
+let scanEnd = null;
+function scanBusy({ busy }) {
+  if (busy && !scanDone) scanDone = new Promise((r) => (scanEnd = r));
+  else if (!busy && scanDone) {
+    scanDone = null;
+    scanEnd();
+  }
 }
 
 function progress(msg) {
@@ -505,7 +590,7 @@ async function review(it) {
 }
 
 function setChoice(it, entry, versions) {
-  if (!it.entry || entryKey(it.entry) !== entryKey(entry)) Object.assign(it, { saved: false, traded: null });
+  if (!it.entry || entryKey(it.entry) !== entryKey(entry)) Object.assign(it, { saved: false, traded: null, tradeKey: undefined });
   Object.assign(it, { entry, status: 'matched', reviewed: true, check: false, error: null });
   if (versions) it.versions = versions;
 }
@@ -550,6 +635,7 @@ async function addAllToCollection() {
 
 function markTraded(it, side) {
   it.traded = side;
+  delete it.tradeKey; // sent as its own card + version
   delete it.forTrade;
 }
 
@@ -707,6 +793,17 @@ const isActive = () => $('#view-batch')?.classList.contains('active');
 
 function render() {
   if (isActive()) renderBatch();
+}
+
+// Sending N cards changes the trade N times: draw once afterwards.
+let renderQueued = false;
+function renderSoon() {
+  if (renderQueued) return;
+  renderQueued = true;
+  queueMicrotask(() => {
+    renderQueued = false;
+    render();
+  });
 }
 
 function forgetThumb(id) {
@@ -938,10 +1035,32 @@ function row(it, n) {
   );
 }
 
+/** The saved batch couldn't be read: say so (an empty batch would look like the photos are gone). */
+function unreadableState() {
+  const retry = (e) => {
+    e.currentTarget.disabled = true;
+    load().catch(() => {
+      toast("Still couldn't open the batch. Close the app completely and open it again.", 4000);
+      render();
+    });
+  };
+  return el(
+    'div',
+    { class: 'b-empty b-unread' },
+    el('h2', {}, 'Couldn’t open your batch'),
+    el('p', { class: 'muted' }, 'The photos saved on this phone couldn’t be read just now. Nothing has been deleted.'),
+    el('div', { class: 'b-empty-actions' }, el('button', { class: 'btn primary', id: 'batch-retry', type: 'button', onclick: retry }, 'Try again')),
+  );
+}
+
 export function renderBatch() {
   const view = $('#view-batch');
-  if (!loaded) {
+  if (loadState === 'loading') {
     view.replaceChildren(el('p', { class: 'muted center' }, 'Loading…'));
+    return;
+  }
+  if (loadState === 'failed') {
+    view.replaceChildren(unreadableState());
     return;
   }
   if (!items.length) {

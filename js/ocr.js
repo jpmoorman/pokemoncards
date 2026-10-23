@@ -143,13 +143,16 @@ export async function fileToCanvas(file, maxSide = 3000) {
 
 // ---------- image prep ----------
 
-/** Crop a region (fractions) and scale it so its width is ~targetW px. */
-function crop(src, r, targetW) {
+/**
+ * Crop a region (fractions) and scale it so its width is ~targetW px (never shrunk, at
+ * most 4× enlarged), or shrunk to `maxPixels` if it would be bigger.
+ */
+function crop(src, r, targetW, maxPixels = Infinity) {
   const sx = Math.round(src.width * r.x);
   const sy = Math.round(src.height * r.y);
   const sw = Math.max(1, Math.round(src.width * r.w));
   const sh = Math.max(1, Math.round(src.height * r.h));
-  const scale = Math.min(4, Math.max(1, targetW / sw));
+  const scale = Math.min(4, Math.max(1, targetW / sw), Math.sqrt(maxPixels / (sw * sh)));
   const c = document.createElement('canvas');
   c.width = Math.round(sw * scale);
   c.height = Math.round(sh * scale);
@@ -373,6 +376,19 @@ async function bottomInverted(r, ocr) {
 // Keep a sliver around a found card, in case an edge was found on its inner frame.
 const WARP_MARGIN = 0.015;
 
+// Telling which way up a card is from its first read (OCR confidences, see readCard):
+// with a bottom line reading at `bottom` or more and a name area at `name` or more it is
+// the right way up; with a bottom line at `sureBottom` or more it is turned only for a name
+// that reads clearly that way. On 43 real photos read both ways round, no upside-down read
+// met the first, and two the second (both with a clearly read name when turned).
+const UPRIGHT = { name: 60, bottom: 80, sureBottom: 85 };
+// A whole photo is OCR'd at most this big: reading time grows with the picture (a 12-megapixel
+// phone photo with no card found took over a minute at full size). With no card outline it
+// is the main read (2.6 MP keeps a 1600 × 1600 photo whole); after the card's own areas
+// read nothing usable it is a last try that rarely finds anything, and some pictures take
+// half a minute at 2.5 MP.
+const PICTURE_PIXELS = { main: 2.6e6, last: 2e6 };
+
 /** A card-shaped picture to read, made when first needed. */
 function view(how, make) {
   let card = null;
@@ -386,39 +402,53 @@ function view(how, make) {
 
 const outline = (canvas, how, corners) => view(how, () => warpCard(canvas, corners, { margin: WARP_MARGIN }));
 
-function findCard(canvas) {
+function findCard(canvas, opts) {
   try {
-    return detectCard(canvas);
+    return detectCard(canvas, opts);
   } catch (e) {
     console.warn('card detection failed', e);
     return null;
   }
 }
 
-const describe = (found) => (found ? `card found (score ${found.score.toFixed(2)}, ${found.ms} ms)` : 'no card outline found');
+const describe = (found) => (found ? `card found (score ${found.score.toFixed(2)}, area ${found.area.toFixed(2)}, ${found.ms} ms)` : 'no card outline found');
+
+// A camera guide crop is mostly card: a smaller copy finds it as well and is quicker to search.
+const GUIDE_DETECT_SIZE = 384;
+// Read a guide crop as is when the card fills it: from 84% of the guide's width up (70% of
+// its area), the name and number still sit in their areas of the crop.
+const GUIDE_FILLED = 0.7;
 
 /**
  * What to read, best guess first:
  *   first:  read in full (name, also in a second OCR mode; number, also inverted), or
  *           lightly (one pass each) when `light`
- *   turns:  the same card other ways up, tried when the first read is unclear: name
- *           area first, the number area too if that doesn't settle it
+ *   turns:  the same card other ways up, tried when the first read doesn't look the right
+ *           way up: name area first, the number area too if that doesn't settle it and
+ *           the first number area read wasn't clear
  *   others: other outlines (name in both OCR modes, number once)
- * A camera guide crop is the card already (upright, or held upside down): the card is
- * looked for only if reading it as is fails, and used only when it isn't the whole crop.
+ * A camera guide crop is the card already (upright, or held upside down) when the card
+ * fills it. When the card found in it (quickly, on a small copy) clearly doesn't, that
+ * card is straightened and read instead, the crop as is only if that fails.
  * In a photo the card is found first; a whole photo is read as is (lightly) only when
  * no card was found in it.
  */
-function plan(canvas, guide, found, debug) {
+function plan(canvas, guide, found) {
   if (guide) {
+    const asIs = view('as is', () => canvas);
+    // An upright card outline inside the crop (a sideways one there is part of the card).
+    const inside = found && !found.landscape && found.area < 0.8 ? found : null;
+    if (inside && inside.area < GUIDE_FILLED) {
+      return {
+        first: outline(canvas, 'found', inside.corners),
+        turns: [outline(canvas, 'turned', rotateCorners(inside.upsideDown || inside.corners, 2))],
+        others: () => [asIs],
+      };
+    }
     return {
-      first: view('as is', () => canvas),
+      first: asIs,
       turns: [view('upside down', () => turnAround(canvas))],
-      others() {
-        const f = findCard(canvas);
-        debug.detect = describe(f);
-        return f && f.area < 0.8 ? [outline(canvas, 'found', f.corners)] : [];
-      },
+      others: () => (inside ? [outline(canvas, 'found', inside.corners)] : []),
     };
   }
   if (!found) return { first: looksLikeCard(canvas) ? view('as is', () => canvas) : null, light: true, turns: [], others: () => [] };
@@ -439,9 +469,9 @@ function plan(canvas, guide, found, debug) {
  *     name inside OCR text; undefined means "can't tell" (catalog not loaded yet).
  * Returns {
  *   clues: { nameBest, nameAll, numbers, setCodes, codeCandidates, artText: '' },
- *          artText is for readStamps(card) to fill in (identify.js does when it matters)
- *   debug: { name, bottom, full, detect, reads } raw OCR text per area, how the card was
- *          found, and how many OCR passes it took,
+ *          artText is for readStamps(card) to fill in (identify.js does for every card read)
+ *   debug: { name, bottom, full, detect, reads, steps } raw OCR text per area, how the card
+ *          was found, how many OCR passes it took and what was read in which order,
  *   card:  the card as read, as a canvas: straightened (portrait, ~600–1000 px wide, 1.5%
  *          margin), or the camera guide crop; null when no card was found or read in a
  *          photo. Areas are fractions of it (NAME_REGION, BOTTOM_REGION, ART_REGION); OCR
@@ -449,7 +479,7 @@ function plan(canvas, guide, found, debug) {
  * }
  */
 export async function readCard(canvas, onStatus, opts = {}) {
-  const debug = { name: '', bottom: '', full: '', detect: '', reads: 0 };
+  const debug = { name: '', bottom: '', full: '', detect: '', reads: 0, steps: [] };
   const ocr = (img, psm) => {
     debug.reads++;
     return recognize(img, psm);
@@ -471,18 +501,23 @@ export async function readCard(canvas, onStatus, opts = {}) {
   // Text the right way up mostly reads with OCR confidence well above 75, upside-down or
   // sideways text below it: a known name read that clearly is the card the right way up.
   const clear = (n) => isSure(n.name.best) || isSure(n.text) || (named(n) && n.conf >= 75);
+  // The right way up, the bottom line (illustrator, copyright, weakness…) nearly always has
+  // a line reading at 80 or more; upside down hardly ever, and then not with a name area
+  // reading at 60 or more as well.
+  const upright = (r) => clear(r.n) || (r.n.conf >= UPRIGHT.name && r.b.conf >= UPRIGHT.bottom);
 
   const guide = guideCrops.has(canvas);
   let found = null;
   if (guide) {
-    debug.detect = 'camera guide crop';
+    found = findCard(canvas, { detectSize: GUIDE_DETECT_SIZE });
+    debug.detect = `camera guide crop, ${describe(found)}`;
   } else {
     onStatus?.('Finding the card…');
     await nextPaint();
     found = findCard(canvas);
     debug.detect = describe(found);
   }
-  const todo = plan(canvas, guide, found, debug);
+  const todo = plan(canvas, guide, found);
 
   // What was read from each view, for the debug text.
   const tried = new Map();
@@ -518,14 +553,18 @@ export async function readCard(canvas, onStatus, opts = {}) {
     note(v, n, b);
     first = { n, b };
     use(v, n, b);
+    debug.steps.push(`${v.how} name ${Math.round(n.conf)} bottom ${Math.round(b.conf)}`);
     // A whole photo read as is is only the card if it read like one.
     if (todo.light && !done()) card = null;
   }
 
-  if (first && !bottom.numbers.length && !clear(first.n) && todo.turns.length) {
+  if (first && !bottom.numbers.length && !upright(first) && todo.turns.length) {
     // Maybe the card is the other way round. Taken that way, a card name must read
     // clearly (or be the only one read at all); failing that, the way round whose text
-    // reads with clearly higher OCR confidence wins.
+    // reads with clearly higher OCR confidence wins. A bottom line that read clearly is
+    // seldom upside down (the name area may still be unreadable: holo foil, a sticker):
+    // then only a clearly read name turns the card.
+    const legible = first.b.conf >= UPRIGHT.sureBottom;
     const probes = [];
     let turn = null;
     for (const v of todo.turns) {
@@ -533,12 +572,12 @@ export async function readCard(canvas, onStatus, opts = {}) {
       const n = await readName(v.card, ocr);
       note(v, n);
       probes.push({ v, n });
-      if (isSure(n.name.best) || isSure(n.text) || (!named(first.n) && named(n))) {
+      if (isSure(n.name.best) || isSure(n.text) || (!legible && !named(first.n) && named(n))) {
         turn = probes.at(-1);
         break;
       }
     }
-    if (!turn) {
+    if (!turn && !legible) {
       const p = probes.reduce((a, q) => (q.n.conf > a.n.conf ? q : a));
       p.b = await readBottom(p.v.card, ocr);
       note(p.v, null, p.b);
@@ -553,6 +592,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
       use(turn.v, n, b);
       turned = true;
     }
+    debug.steps.push(`turns: ${probes.map((p) => `${p.v.how} name ${Math.round(p.n.conf)}${p.b ? ` bottom ${Math.round(p.b.conf)}` : ''}`).join(', ')}${turned ? ' -> turned' : ''}`);
   }
 
   // Other outlines, unless the card was just found to be the other way round.
@@ -568,6 +608,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
         card = v.card;
       }
       nameText += `\n${n.text}`;
+      debug.steps.push(`${v.how} name ${Math.round(n.conf)} bottom ${Math.round(b.conf)}`);
       if (done()) break;
     }
   }
@@ -576,13 +617,20 @@ export async function readCard(canvas, onStatus, opts = {}) {
   debug.bottom = [...tried].filter(([, t]) => t.bottom != null).map(([v, t]) => label(v) + t.bottom).join('\n');
 
   let fullText = '';
-  if (!bottom.numbers.length || !isKnown(name.best)) {
+  // A known card name anywhere in the name area's text counts (it is used below).
+  const nameKnown = isKnown(name.best) || isKnown(nameText);
+  if (!bottom.numbers.length || !nameKnown) {
     onStatus?.('Reading whole card…');
-    // Nothing usable from any outline: maybe it wasn't the card, so read the whole picture.
-    const src = bottom.numbers.length || isKnown(name.best) ? card || canvas : canvas;
-    const full = enhance(crop(src, { x: 0, y: 0, w: 1, h: 1 }, Math.min(2000, Math.max(1200, src.width))));
+    // Nothing usable from any outline: maybe it wasn't the card, so read the whole picture
+    // (shrunk, see PICTURE_PIXELS). Else the whole card: at that scale OCR often gets a
+    // number (or name) its own area's read missed.
+    const picture = !card || (!bottom.numbers.length && !nameKnown);
+    const src = picture ? canvas : card;
+    const maxPixels = !picture ? Infinity : todo.light ? PICTURE_PIXELS.main : PICTURE_PIXELS.last;
+    const full = enhance(crop(src, { x: 0, y: 0, w: 1, h: 1 }, Math.min(2000, Math.max(1200, src.width)), maxPixels));
     const res = await ocr(full, 11);
     debug.full = res.text;
+    debug.steps.push(picture ? 'read picture' : 'read card');
     fullText = res.text;
     bottom = mergeBottom(bottom, parseBottomText(res.text));
     if (!name.best) {

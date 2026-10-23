@@ -17,28 +17,46 @@ export function el(tag, attrs = {}, ...children) {
 }
 
 export function toast(msg, ms = 2200) {
-  // One message at a time: a new toast replaces the previous plain one.
+  // One message at a time: a new toast replaces the previous plain one, but never a toast
+  // with a button (Undo, View…): it shows above that one instead.
   document.querySelectorAll('.toast[data-plain]').forEach((n) => n.remove());
   const t = el('div', { class: 'toast', role: 'status', 'data-plain': true }, msg);
   document.body.append(t);
+  stackAbove(t);
   setTimeout(() => t.remove(), ms);
 }
 
-/** A toast with one button (Undo, View…). onEnd(tapped) runs once its time is up, even if a newer toast replaced it. */
+/**
+ * A toast with one button (Undo, View…). It replaces an older one, and plain toasts don't replace it.
+ * onEnd(tapped) runs once its time is up, even if a newer toast replaced it. Returns { close() }.
+ */
 export function actionToast(msg, label, onAction, { ms = 5000, onEnd } = {}) {
-  document.querySelectorAll('.toast[data-plain]').forEach((n) => n.remove());
+  document.querySelectorAll('.toast[data-action]').forEach((n) => n.remove());
   let tapped = false;
   const onclick = () => {
     tapped = true;
     t.remove();
     onAction();
   };
-  const t = el('div', { class: 'toast toast-action', role: 'status', 'data-plain': true }, el('span', {}, msg), el('button', { type: 'button', onclick }, label));
+  const t = el('div', { class: 'toast toast-action', role: 'status', 'data-action': true }, el('span', {}, msg), el('button', { type: 'button', onclick }, label));
   document.body.append(t);
+  stackAbove(t);
+  document.querySelectorAll('.toast[data-plain]').forEach(stackAbove); // a message showing now moves up
   setTimeout(() => {
     t.remove();
     onEnd?.(tapped);
   }, ms);
+  return { close: () => t.remove() };
+}
+
+/** Raise a toast above the ones that stay on screen (Undo, View, "Saving photo…"), so none covers another. */
+function stackAbove(t) {
+  const tops = [...document.querySelectorAll('.toast:not([data-plain])')]
+    .filter((n) => n !== t)
+    .map((n) => n.getBoundingClientRect())
+    .filter((r) => r.height)
+    .map((r) => r.top);
+  t.style.bottom = tops.length ? `${Math.round(document.documentElement.clientHeight - Math.min(...tops) + 8)}px` : '';
 }
 
 export function setStatus(target, msg, isError = false) {
@@ -56,6 +74,10 @@ export function setStatus(target, msg, isError = false) {
 //                 navigate('scan', { batchMode: true }) opens it with Batch mode switched on;
 //                 navigate('search', { tradeSide: 'get' }) does the same for Search.
 // 'batch:changed' detail: {}  (queue size changed)
+// 'trade:changed' detail: {} after any change to the trade (trade.js inTrade() has the new state), or
+//                 { side, from, to } a line on that side changed version (entryKey from -> to), or
+//                 { swapped: true } Swap sides
+// 'scan:busy'     detail: { busy }  a scan on the Scan tab started (true) or finished (false)
 // 'sheet:closed'  detail: { owner? }
 // 'catalog:ready' detail: {}
 // 'fx:ready'     detail: { rate, date, fallback }

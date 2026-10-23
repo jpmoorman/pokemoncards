@@ -6,7 +6,7 @@
 //   STAMP_PHOTOS="/path/aurorus.jpg=Set Logo Stamp" node tests/e2e-stamps.mjs
 import fs from 'node:fs';
 import path from 'node:path';
-import { startHarness, reporter, results, CARDS } from './harness.mjs';
+import { startHarness, reporter, results, CARDS, stubNetwork } from './harness.mjs';
 import { makePhoto, PHOTOS } from './photo-helpers.mjs';
 import { makeStampedCard } from './stamp-helpers.mjs';
 
@@ -181,7 +181,92 @@ for (const setup of ['toploader', 'turned', 'steep']) {
   t.check('scanning while a batch runs: same stamp and version as alone', r.alone === 'Set Logo Stamp' && r.together === r.alone && r.art[0] === r.art[1] && r.blockReads > 0 && !r.interleaved, JSON.stringify(r));
 }
 
-// 6) Optional real photos: STAMP_PHOTOS="/abs/a.jpg=Set Logo Stamp,/abs/b.jpg=Holo".
+// 6) The best match has no stamped version, but the card picked instead does: picking it
+// in the result sheet (or in a batch review) still finds the stamp. A Play! Pokémon
+// stamped Charizard ex printed as 215/197 matches 215/197 (never stamped) first; the user
+// picks 125/197 (comes with that stamp).
+{
+  const png = await makeStampedCard(page, { ...CARDS.charizardEx, bottomLeft: 'G  OBF EN  215/197 ★' }, 'player-rewards-program');
+  await page.setInputFiles('#file-input-library', { name: 'alt-stamp.png', mimeType: 'image/png', buffer: png });
+  await page.waitForFunction(() => /215\//.test(document.querySelector('.detail-meta')?.textContent || '') && document.querySelector('.headline-price')?.textContent.trim(), null, { timeout: 120000 });
+  const first = await page.evaluate(() => document.querySelector('.variant-chips .chip.active')?.firstChild?.textContent || document.querySelector('.detail-meta')?.textContent);
+  await page.evaluate(() => [...document.querySelectorAll('#alternates .tile')].find((t) => /125\/197/.test(t.textContent))?.click());
+  await page.waitForFunction(() => /125\//.test(document.querySelector('.detail-meta')?.textContent || '') && document.querySelector('.headline-price')?.textContent.trim(), null, { timeout: 20000 });
+  const picked = await page.evaluate(() => ({
+    version: document.querySelector('.variant-chips .chip.active')?.firstChild?.textContent,
+    reason: document.querySelector('.variant-reason')?.textContent || '',
+  }));
+  await page.click('.sheet-close');
+  // The batch queue picks the version of a re-matched card from the same clues.
+  const batch = await page.evaluate(async (b64) => {
+    const { identify } = await import('/js/identify.js');
+    const { fileToCanvas } = await import('/js/ocr.js');
+    const { getCard } = await import('/js/api.js');
+    const { variantPrices } = await import('/js/prices.js');
+    const { chooseVariant } = await import('/js/stamps.js');
+    const r = await identify(await fileToCanvas(await (await fetch(`data:image/png;base64,${b64}`)).blob()), () => {});
+    const card = await getCard('sv03-125');
+    const rows = variantPrices(card);
+    return { top: r.ranked[0]?.card.id, version: rows[chooseVariant(rows, { card, clues: r.clues })]?.label };
+  }, png.toString('base64'));
+  t.check(
+    'picking another match with a stamped version still picks the stamp (sheet and batch)',
+    picked.version === 'Holo Play! Pokémon Stamp' && batch.top === 'sv03-215' && batch.version === 'Holo Play! Pokémon Stamp',
+    JSON.stringify({ first, picked, batch }),
+  );
+}
+
+// 7) Card details slow to come or offline: identify() never waits for them (no stamp
+// decision hangs on them), and the result sheet's request shares the download that
+// identify() started for the best match. A fresh browser profile, so nothing is cached.
+{
+  const ctx = await h.browser.newContext({ viewport: { width: 390, height: 844 } });
+  await stubNetwork(ctx, h.origin);
+  const p2 = await ctx.newPage();
+  p2.on('pageerror', (e) => h.logs.push(`pageerror: ${e.message}`));
+  let mode = 'ok';
+  const asked = [];
+  await p2.route(/https:\/\/api\.tcgdex\.net\/v2\/en\/cards\/.+/, async (route) => {
+    asked.push(new URL(route.request().url()).pathname.split('/').pop());
+    if (mode === 'offline') return route.abort('internetdisconnected');
+    if (mode === 'slow') await new Promise((r) => setTimeout(r, 4000));
+    return route.fallback();
+  });
+  await p2.goto(`${h.origin}/index.html`);
+  await p2.waitForFunction(() => window.cardScanner?.catalog?.index, null, { timeout: 30000 });
+  const png = (await makeStampedCard(p2, CARDS.aurorus, null)).toString('base64');
+  const run = (b64) =>
+    p2.evaluate(async (b64) => {
+      const { identify } = await import('/js/identify.js');
+      const { fileToCanvas } = await import('/js/ocr.js');
+      const { getCard } = await import('/js/api.js');
+      const canvas = await fileToCanvas(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+      const t0 = performance.now();
+      const r = await identify(canvas, () => {});
+      const ms = performance.now() - t0;
+      // What the result sheet does next.
+      const card = await getCard(r.ranked[0].card.id).catch(() => null);
+      return { ms: Math.round(ms), top: r.ranked[0]?.card.id, price: !!card };
+    }, b64);
+  await run((await makeStampedCard(p2, CARDS.mewtwo30th, null)).toString('base64')); // warm-up: OCR engine, JIT
+  mode = 'offline';
+  const offline = await run(png);
+  mode = 'slow';
+  const before = asked.length;
+  const slow = await run(png);
+  slow.requests = asked.length - before;
+  mode = 'ok';
+  const cached = await run(png); // details now on the device: no request at all
+  const extra = Math.max(offline.ms, slow.ms) - cached.ms;
+  t.check(
+    `slow or offline card details don't hold up identify() (+${extra} ms), one download shared`,
+    offline.top === 'me03-024' && slow.top === 'me03-024' && slow.price && cached.price && extra < 1000 && slow.requests === 1,
+    JSON.stringify({ offline, slow, cached, asked }),
+  );
+  await ctx.close();
+}
+
+// 8) Optional real photos: STAMP_PHOTOS="/abs/a.jpg=Set Logo Stamp,/abs/b.jpg=Holo".
 for (const item of (process.env.STAMP_PHOTOS || '').split(',').filter(Boolean)) {
   const [file, version] = item.split('=');
   const got = await scan(fs.readFileSync(file), `real-${path.basename(file, path.extname(file))}`, 'image/jpeg');

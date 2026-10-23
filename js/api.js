@@ -102,9 +102,32 @@ function expand(catalog) {
 }
 
 const cardMem = new Map(); // id -> { t, card }, same as the IndexedDB copy
+const cardLoads = new Map(); // id -> download in progress, shared by everyone asking meanwhile
+
+/** Download a card's details once, however many callers ask while it's on its way. */
+function downloadCard(id) {
+  let load = cardLoads.get(id);
+  if (!load) {
+    load = getJSON(`/cards/${encodeURIComponent(id)}`)
+      .then((card) => {
+        if (card) {
+          const copy = { t: Date.now(), card };
+          cardMem.set(id, copy);
+          kvSet(`card:${id}`, copy);
+        }
+        return card;
+      })
+      .finally(() => cardLoads.delete(id));
+    cardLoads.set(id, load);
+  }
+  return load;
+}
+
 /**
  * Full card details including prices, kept for 12 hours.
  * { fresh: true } downloads them again (Refresh prices); offline it still falls back to the saved copy.
+ * Callers asking for the same card at the same time share one download (identify.js starts
+ * it for the best match; the result sheet or batch queue then asks for the same card).
  */
 export async function getCard(id, { fresh = false } = {}) {
   const key = `card:${id}`;
@@ -114,13 +137,7 @@ export async function getCard(id, { fresh = false } = {}) {
     return cached.card;
   }
   try {
-    const card = await getJSON(`/cards/${encodeURIComponent(id)}`);
-    if (card) {
-      const copy = { t: Date.now(), card };
-      cardMem.set(id, copy);
-      kvSet(key, copy);
-    }
-    return card;
+    return await downloadCard(id);
   } catch (e) {
     if (!cached) throw e;
     cardMem.set(id, cached);

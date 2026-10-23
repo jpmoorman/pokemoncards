@@ -63,11 +63,23 @@ async function identifyIn(buf, turns = 0) {
       let on = true;
       const watch = () => on && (painted.add(statuses.at(-1)), requestAnimationFrame(watch));
       requestAnimationFrame(watch);
+      // Size of every picture OCR'd (reading time grows with it).
+      const worker = await (await import('/js/ocr.js')).getWorker();
+      if (!worker.__sized) {
+        const recognize = worker.recognize.bind(worker);
+        worker.recognize = (img, ...rest) => {
+          window.__ocrSizes.push(img.width * img.height);
+          return recognize(img, ...rest);
+        };
+        worker.__sized = true;
+      }
+      window.__ocrSizes = [];
       const log = window.__ocrLog.length;
       const t0 = performance.now();
       const r = await identify(canvas, (m) => statuses.push(m));
       on = false;
       return {
+        megapixels: +(Math.max(0, ...window.__ocrSizes) / 1e6).toFixed(2),
         id: r.ranked[0]?.card.id,
         name: r.clues.nameBest,
         number: r.clues.numbers[0]?.text,
@@ -253,19 +265,34 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
   const empty = await makePhoto(page, CARDS.aurorus, { noCard: true, background: 'carpet' });
   const r = await identifyIn(empty.buffer);
   t.check(`photo with no card: at most 3 OCR passes (${r.reads}, ${r.seconds}s)`, r.reads <= 3 && !r.art && !r.statuses.includes('Checking for stamps…'), JSON.stringify(r));
+  // A phone camera's 12-megapixel photo: the whole picture is read shrunk (it took over a
+  // minute at full size, 6.75 megapixels once loaded).
+  const big = await makePhoto(page, CARDS.aurorus, { noCard: true, background: 'carpet', width: 3024, height: 4032 });
+  const rb = await identifyIn(big.buffer);
+  t.check(`phone-size photo with no card gives up in ${rb.seconds}s: ${rb.reads} OCR passes, none over 2.6 megapixels (${rb.megapixels})`, rb.reads <= 3 && rb.megapixels <= 2.6, JSON.stringify(rb));
+  // An upright card whose name and number can't be read (a sticker over the name, no
+  // number printed): after the card's own areas, the whole photo is read shrunk too (it
+  // was read at full size, 3 megapixels here).
+  const covered = await makePhoto(page, { ...CARDS.charizardEx, bottomLeft: 'G  OBF EN' }, { ...PHOTOS.flat, sticker: 'name' });
+  const rc = await identifyIn(covered.buffer);
+  t.check(`card with its name and number covered gives up in ${rc.reads} OCR passes, none over 2 megapixels (${rc.megapixels}, ${rc.seconds}s)`, rc.reads <= 10 && rc.megapixels <= 2.1, JSON.stringify(rc));
   const photo = await makePhoto(page, CARDS.mewtwo30th, PHOTOS.flat);
   const m = await identifyIn(photo.buffer);
   t.check('"Finding the card…" is shown before the card is looked for', m.id === '30th-157' && m.painted.includes('Finding the card…'), JSON.stringify(m));
-  t.check('no stamp read for a card printed without stamps', !m.statuses.includes('Checking for stamps…') && !m.art, JSON.stringify(m));
+  // The user may pick another match (or re-match) that has stamped versions: the artwork
+  // text is there for that even when the best match is never stamped.
+  t.check('the stamp area is read for a card printed without stamps too', m.statuses.includes('Checking for stamps…') && typeof m.art === 'string' && m.reads <= 3, JSON.stringify(m));
 }
 
-// 7) Camera guide crops are the card already: read as is, no card finding, two OCR
-// passes for a clean card. Upside down in the guide still reads.
+// 7) Camera guide crops: a card filling the guide is read as is (name + number + stamp
+// area, no "Finding the card…" wait); upside down in the guide still reads. A card held
+// further away, filling 65% of the guide's width, is straightened first instead of
+// being read as is, turned around and only then looked for (9 passes).
 {
   const png = await makeCard(page, CARDS.charizardEx);
-  for (const upsideDown of [false, true]) {
+  for (const [upsideDown, k] of [[false, 1], [true, 1], [false, 0.67], [true, 0.67]]) {
     const r = await page.evaluate(
-      async ({ b64, upsideDown }) => {
+      async ({ b64, upsideDown, k }) => {
         const { captureGuide } = await import('/js/ocr.js');
         const { identify } = await import('/js/identify.js');
         const img = new Image();
@@ -281,7 +308,7 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
           g.fillRect(0, 0, 720, 1280);
           g.translate(360, 640);
           if (upsideDown) g.rotate(Math.PI);
-          g.drawImage(img, -320, -447, 640, 894);
+          g.drawImage(img, -320 * k, -447 * k, 640 * k, 894 * k);
         };
         draw();
         const stream = src.captureStream();
@@ -306,10 +333,11 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
         const res = await identify(crop, (m) => statuses.push(m));
         return { id: res.ranked[0]?.card.id, size: `${crop.width}x${crop.height}`, detect: res.debug.detect, reads: window.__ocrLog.slice(log).filter((m) => m === 'R').length, statuses };
       },
-      { b64: png.toString('base64'), upsideDown },
+      { b64: png.toString('base64'), upsideDown, k },
     );
-    const max = upsideDown ? 8 : 3; // name + number (+ the Play! Pokémon stamp check)
-    t.check(`camera guide crop${upsideDown ? ', card upside down,' : ''} is read as is (${r.reads} OCR passes)`, r.id === 'sv03-125' && r.reads <= max && !r.statuses.includes('Finding the card…'), JSON.stringify(r));
+    const max = upsideDown ? 8 : 3; // name + number + the stamp area
+    const what = `camera guide crop${k < 1 ? `, card ${Math.round(k * 97)}% of the guide` : ''}${upsideDown ? ', card upside down,' : ''}`;
+    t.check(`${what} is read in ${r.reads} OCR passes`, r.id === 'sv03-125' && r.reads <= max && !r.statuses.includes('Finding the card…'), JSON.stringify(r));
   }
 }
 
@@ -334,7 +362,8 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
   t.check('two reads at once keep their own OCR mode', r.a === r.sparse && r.b === r.block && r.log === 'P11 R P6 R', JSON.stringify(r));
 }
 
-const errors = h.errors();
+// Tesseract's own complaints about blank or tiny areas (a sticker, a bare photo) aren't page errors.
+const errors = h.errors().filter((l) => !/^error: (Image too small to scale|Line cannot be recognized|Error in (boxClipToRectangle|pixScanForForeground))/.test(l));
 t.check('no page errors', !errors.length, errors.join('\n'));
 await h.close();
 t.done();

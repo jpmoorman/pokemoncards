@@ -109,6 +109,31 @@ t.check(
 );
 await shot('empty');
 
+// ---- a single scan not looked at yet doesn't open in the trade scanner ----
+{
+  await page.click('.tab[data-view="scan"]');
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 }); // phone speed: time to switch tabs mid-scan
+  await page.setInputFiles('#file-input-library', { name: 'card.png', mimeType: 'image/png', buffer: await makeCard(page, CARDS.baseCharizard) });
+  await page.waitForSelector('#guide.busy');
+  await page.click('.tab[data-view="trade"]');
+  await page.waitForFunction(() => !document.querySelector('#guide.busy'), null, { timeout: 120000 });
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const offered = await page.evaluate(() => document.querySelector('.toast-action')?.textContent || '');
+  await page.click('#trade-give button:has-text("Scan")');
+  await page.waitForSelector('#view-scan.active #scan-target:not([hidden])');
+  await page.waitForTimeout(500);
+  const stale = await page.evaluate(() => ({ sheet: !document.querySelector('#sheet').hidden, name: document.querySelector('.detail-name')?.textContent, offer: !!document.querySelector('.toast-action') }));
+  t.check(
+    "a single scan not looked at doesn't open when scanning for a trade starts, and its offer goes",
+    /Scan ready: Charizard/.test(offered) && !stale.sheet && !stale.offer,
+    `${offered} → ${JSON.stringify(stale)}`,
+  );
+  if (stale.sheet) await page.click('.sheet-close');
+  await page.click('#btn-target-done');
+  await tradeView();
+}
+
 // ---- You give: scan a card from the Trade tab ----
 await page.click('#trade-give button:has-text("Scan")');
 await page.waitForSelector('#view-scan.active #scan-target:not([hidden])');

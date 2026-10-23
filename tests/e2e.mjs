@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { startHarness, makeCard, reporter, results, CARDS } from './harness.mjs';
+import { startHarness, makeCard, reporter, results, fixtures, CARDS } from './harness.mjs';
 
 const h = await startHarness();
 const t = reporter();
@@ -72,6 +72,36 @@ for (const c of cases) {
     await page.screenshot({ path: path.join(results, 'aurorus-stamp-version.png') });
   }
   await page.click('.sheet-close');
+}
+
+// A scan finished while on another tab opens on the next visit to Scan, but not minutes later.
+{
+  const cdp = await page.context().newCDPSession(page);
+  const scanAway = async () => {
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 }); // phone speed: time to switch tabs mid-scan
+    await page.setInputFiles('#file-input-library', { name: 'card.png', mimeType: 'image/png', buffer: await makeCard(page, CARDS.aurorus) });
+    await page.waitForSelector('#guide.busy');
+    await page.click('.tab[data-view="search"]');
+    await page.waitForFunction(() => !document.querySelector('#guide.busy'), null, { timeout: 120000 });
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  };
+  const opened = () => page.evaluate(() => (document.querySelector('#sheet').hidden ? null : document.querySelector('.detail-name')?.textContent || '?'));
+  await scanAway();
+  await page.click('.tab[data-view="scan"]');
+  await page.waitForTimeout(500);
+  const soon = await opened();
+  if (soon) await page.click('.sheet-close');
+  await scanAway();
+  await page.evaluate(() => {
+    window.__now = Date.now;
+    Date.now = () => window.__now() + 4 * 60 * 1000; // four minutes later
+  });
+  await page.click('.tab[data-view="scan"]');
+  await page.waitForTimeout(500);
+  const later = await opened();
+  await page.evaluate(() => (Date.now = window.__now));
+  if (later) await page.click('.sheet-close');
+  t.check('a scan not looked at opens on the next visit to Scan, but not four minutes later', soon === 'Aurorus' && later === null, `soon=${soon} later=${later}`);
 }
 
 // Manual search with the set picker + collection in USD.
@@ -151,6 +181,35 @@ t.check(
   /^Refreshing/.test(during) && refreshed === 'Aurorus ×1, Charizard ×2, Oddish ×1',
   `${during} → ${refreshed}`,
 );
+
+// Refresh again minutes later: it downloads current prices (not the 12-hour copy), keeps the price
+// of a card it can't reach and says so.
+{
+  const mark = h.logs.length;
+  const aurorus = 'https://api.tcgdex.net/v2/en/cards/me03-024';
+  const oddish = 'https://api.tcgdex.net/v2/en/cards/sv03-001';
+  await page.route(aurorus, (route) => {
+    const card = JSON.parse(fs.readFileSync(path.join(fixtures, 'card-me03-024.json')));
+    for (const v of card.variants_detailed) for (const p of Object.values(v.pricing?.tcgplayer || {})) if (p?.marketPrice != null) p.marketPrice = 7.77;
+    route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(card) });
+  });
+  await page.route(oddish, (route) => route.abort('internetdisconnected'));
+  const prices = () => page.evaluate(() => Object.fromEntries(JSON.parse(localStorage.getItem('collection.v1')).map((i) => [i.name, i.price?.value])));
+  const before = await prices();
+  await page.evaluate(() => document.querySelectorAll('.toast').forEach((n) => n.remove()));
+  await page.click('#btn-refresh-prices');
+  await page.waitForFunction(() => document.querySelector('#btn-refresh-prices').textContent === 'Refresh prices', null, { timeout: 30000 });
+  const msg = await page.evaluate(() => document.querySelector('.toast[data-plain]')?.textContent || '');
+  const now = await prices();
+  await page.unroute(aurorus);
+  await page.unroute(oddish);
+  for (let i = h.logs.length - 1; i >= mark; i--) if (/Failed to load resource/.test(h.logs[i])) h.logs.splice(i, 1);
+  t.check(
+    "Refresh prices downloads cards looked up minutes ago, keeps the price it can't update and says so",
+    now.Aurorus === 7.77 && before.Aurorus !== 7.77 && now.Oddish === before.Oddish && now.Charizard === before.Charizard && msg === "Updated 2 of 3 cards — couldn't reach the price server for the rest",
+    `${JSON.stringify(before)} → ${JSON.stringify(now)} | ${msg}`,
+  );
+}
 
 // A card sheet opens at the top, even right after another sheet was scrolled down.
 await page.click('.tab[data-view="search"]');

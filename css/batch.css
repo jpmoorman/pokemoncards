@@ -90,6 +90,9 @@
   background: var(--accent); color: var(--accent-ink); font-weight: 800;
 }
 .b-empty-actions { display: grid; gap: 8px; }
+/* the saved batch couldn't be read (nothing was deleted) */
+.b-unread { padding-top: 24px; }
+.b-unread .b-empty-actions { margin-top: 16px; }
 
 /* "Saving photo 3 of 12…" pill (uses .toast) */
 .b-saving { width: max-content; max-width: calc(100vw - 32px); }
