@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { startHarness, makeCard, reporter, results, fixtures, CARDS } from './harness.mjs';
+import { startHarness, makeCard, reporter, results, fixtures, CARDS, pickSet } from './harness.mjs';
 
 const h = await startHarness();
 const t = reporter();
@@ -31,7 +31,7 @@ async function scanFile(spec, label) {
     conf: document.querySelector('#confidence')?.textContent,
     clueName: document.querySelector('#clue-name')?.value,
     clueNum: document.querySelector('#clue-number')?.value,
-    clueSet: document.querySelector('#clue-set')?.selectedOptions[0]?.textContent,
+    clueSet: document.querySelector('.setpick:has(#clue-set) .setpick-input')?.value || 'Any set',
     debug: document.querySelector('#debug')?.textContent,
   }));
   got.seconds = ((Date.now() - started) / 1000).toFixed(1);
@@ -106,7 +106,7 @@ for (const c of cases) {
 
 // Manual search with the set picker + collection in USD.
 await page.click('.tab[data-view="search"]');
-await page.selectOption('#q-set', 'base1');
+await pickSet(page, 'q-set', 'base1');
 await page.fill('#q-number', '4');
 await page.click('#search-form button[type="submit"]');
 await page.click('#search-results .tile');
@@ -164,7 +164,7 @@ await page.click('#btn-refresh-prices');
 await page.waitForFunction(() => /Refreshing/.test(document.querySelector('#btn-refresh-prices').textContent));
 await page.click('#collection-list .citem:first-child [aria-label="Add one"]');
 await page.click('.tab[data-view="search"]');
-await page.selectOption('#q-set', '');
+await pickSet(page, 'q-set', '');
 await page.fill('#q-name', 'Aurorus');
 await page.fill('#q-number', '024');
 await page.click('#search-form button[type="submit"]');

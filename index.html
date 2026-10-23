@@ -75,7 +75,7 @@
       <form class="search-form" id="search-form" autocomplete="off">
         <input type="search" id="q-name" placeholder="Card name, e.g. Charizard ex" enterkeyhint="search" />
         <input type="text" id="q-number" placeholder="No. e.g. 024/088" inputmode="text" />
-        <select id="q-set" aria-label="Set"><option value="">Any set</option></select>
+        <div class="setpick"><input class="setpick-input" type="text" placeholder="Set: type a code (POR, EVS) or name — any set" aria-label="Set" role="combobox" aria-expanded="false" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done" /><button type="button" class="setpick-clear" aria-label="Clear set" hidden>✕</button><input type="hidden" id="q-set" value="" /><ul class="setpick-list" role="listbox" hidden></ul></div>
         <button class="btn primary" type="submit">Search</button>
       </form>
       <p class="status" id="search-status"></p>
@@ -113,7 +113,7 @@
         <form id="clue-form" class="clue-form" autocomplete="off">
           <label class="f-name">Name <input id="clue-name" /></label>
           <label class="f-num">Number <input id="clue-number" placeholder="e.g. 024/088" /></label>
-          <label class="f-set">Set <select id="clue-set"><option value="">Any set</option></select></label>
+          <label class="f-set">Set <div class="setpick"><input class="setpick-input" type="text" placeholder="Any set — type a code or name" aria-label="Set" role="combobox" aria-expanded="false" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done" /><button type="button" class="setpick-clear" aria-label="Clear set" hidden>✕</button><input type="hidden" id="clue-set" value="" /><ul class="setpick-list" role="listbox" hidden></ul></div></label>
           <button class="btn small" type="submit">Re-match</button>
         </form>
       </div>

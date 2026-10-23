@@ -160,3 +160,19 @@ export const CARDS = {
   mewtwo30th: { border: '#c9ccd1', inner: '#f1ede3', stage: 'BASIC', name: 'Mewtwo ex', hp: 'HP 230', bottomLeft: 'I  30C EN  157/128 ★', attack: 'Photon Bullets', illus: 'Illus. YOSHIROTTEN' },
   aurorus: { border: '#c9ccd1', inner: '#bfe0f2', stage: 'STAGE 2', name: 'Aurorus', hp: 'HP 170', evolves: 'Evolves from Amaura', bottomLeft: 'J  POR EN  024/088 ★', attack: 'Freezing Chill', illus: 'Illus. HACCAN' },
 };
+
+/** Choose a set in a type-to-filter set picker (hidden input id 'q-set' or 'clue-set'); '' clears it. */
+export async function pickSet(page, hiddenId, setId) {
+  const input = `.setpick:has(#${hiddenId}) .setpick-input`;
+  if (!setId) {
+    await page.fill(input, '');
+    await page.locator(input).blur();
+    await page.waitForFunction((id) => document.getElementById(id).value === '', hiddenId);
+    return;
+  }
+  const name = await page.evaluate((id) => window.cardScanner.catalog.index.setsById.get(id)?.name, setId);
+  await page.click(input);
+  await page.fill(input, name);
+  await page.locator(`.setpick:has(#${hiddenId}) li[data-id="${setId}"]`).dispatchEvent('pointerdown');
+  await page.waitForFunction(([h, id]) => document.getElementById(h).value === id, [hiddenId, setId]);
+}

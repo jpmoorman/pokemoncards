@@ -4,7 +4,7 @@
 //   CHROMIUM_PATH=/opt/pw-browsers/chromium node tests/e2e-trade.mjs
 import fs from 'node:fs';
 import path from 'node:path';
-import { startHarness, makeCard, reporter, results, fixtures, CARDS } from './harness.mjs';
+import { startHarness, makeCard, reporter, results, fixtures, CARDS, pickSet } from './harness.mjs';
 
 const t = reporter();
 
@@ -90,7 +90,7 @@ async function searchAndOpen(setId, number, name) {
   await page.waitForSelector('#view-search.active');
   await page.evaluate(() => document.querySelector('#search-results').replaceChildren());
   await page.fill('#q-name', '');
-  await page.selectOption('#q-set', setId);
+  await pickSet(page, 'q-set', setId);
   await page.fill('#q-number', number);
   await page.click('#search-form button[type="submit"]');
   await page.click(`#search-results .tile:has-text("${number}/")`);

@@ -3,7 +3,8 @@ import { $, $$, el, emit, toast } from './ui.js';
 import { getCard, setSymbol } from './api.js';
 import { rankCandidates, confidence } from './match.js';
 import { variantPrices, headlinePrice, formatMoney, marketLinks, printedNumber, variantImage, eurToUsd } from './prices.js';
-import { catalog, catalogReady, abbrReady, setOptions } from './catalog.js';
+import { catalog, catalogReady, abbrReady } from './catalog.js';
+import { setPickerValue } from './setpicker.js';
 import { pickVariant } from './stamps.js';
 import { cardTile } from './components.js';
 import { makeEntry } from './entry.js';
@@ -51,15 +52,10 @@ function cluesFromForm() {
   };
 }
 
-/** Fill a <select> with every set: coded sets ("POR · Perfect Order") then older symbol-only sets. */
-export function fillSetSelect(select, selectedId = '') {
-  const { coded, older } = setOptions();
-  select.replaceChildren(
-    el('option', { value: '' }, 'Any set'),
-    el('optgroup', { label: 'Set code printed on the card' }, ...coded.map((s) => el('option', { value: s.id }, `${s.code} · ${s.name}`))),
-    el('optgroup', { label: 'Older sets (symbol only)' }, ...older.map((s) => el('option', { value: s.id }, s.name))),
-  );
-  select.value = selectedId || '';
+/** Show a set in a picker by its hidden input id; '' = any set. */
+export function fillSetSelect(hiddenOrId, selectedId = '') {
+  const id = typeof hiddenOrId === 'string' ? hiddenOrId : hiddenOrId?.id;
+  if (id) setPickerValue(id, selectedId);
 }
 
 function selectedSetFromClues(clues) {
@@ -102,7 +98,7 @@ export function showResults(ranked, clues, debug, opts = {}) {
     $('#clue-name').value = clues.nameBest || clues.nameAll || '';
     const n = clues.numbers?.[0];
     $('#clue-number').value = n ? n.text || `${n.prefix}${n.num}${n.total ? `/${n.prefix}${n.total}` : ''}` : '';
-    fillSetSelect($('#clue-set'), selectedSetFromClues(clues));
+    fillSetSelect('clue-set', selectedSetFromClues(clues));
     const conf = confidence(ranked);
     const confEl = $('#confidence');
     confEl.className = `conf ${conf}`;

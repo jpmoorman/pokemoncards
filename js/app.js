@@ -7,6 +7,7 @@ import { identify } from './identify.js';
 import { loadRate } from './fx.js';
 import { initSheet, showResults, openCard, closeSheet, fillSetSelect, parseNumberInput } from './sheet.js';
 import { cardTile } from './components.js';
+import { mountSetPicker } from './setpicker.js';
 import { initCollection, renderCollection } from './collection.js';
 import { initBatch, renderBatch, enqueueCanvas, enqueueFiles, batchCount } from './batch.js';
 import { initTrade, renderTrade } from './trade.js';
@@ -28,6 +29,7 @@ const READY_MS = 3 * 60 * 1000; // a scan not looked at is dropped after this
 const VIEWS = ['scan', 'batch', 'trade', 'search', 'collection'];
 
 async function init() {
+  document.querySelectorAll('.setpick').forEach(mountSetPicker);
   bindTabs();
   bindScan();
   bindSearch();
@@ -40,7 +42,7 @@ async function init() {
   initCatalog((m) => setStatus('#scan-status', m))
     .then(() => {
       setStatus('#scan-status', state.stream ? 'Line the card up with the frame, then tap the button.' : '');
-      fillSetSelect($('#q-set'));
+      fillSetSelect('q-set', $('#q-set').value);
       emit('catalog:ready', {});
     })
     .catch((e) => {
@@ -48,7 +50,7 @@ async function init() {
       setStatus('#scan-status', 'Could not download the card database. Check your connection and reload.', true);
     });
   // Refill set pickers once set codes are known.
-  import('./catalog.js').then(({ abbrReady }) => abbrReady().then(() => fillSetSelect($('#q-set'), $('#q-set').value)));
+  import('./catalog.js').then(({ abbrReady }) => abbrReady().then(() => fillSetSelect('q-set', $('#q-set').value)));
 
   loadRate().then((info) => emit('fx:ready', info));
 

@@ -136,7 +136,7 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 /* ---------- search ---------- */
 .search-form { display: grid; grid-template-columns: 1fr 8em; gap: 8px; }
-.search-form select, .search-form .btn { grid-column: 1 / -1; }
+.search-form .setpick, .search-form .btn { grid-column: 1 / -1; }
 input, select {
   width: 100%; background: var(--surface); color: var(--text); border: 1px solid var(--border);
   border-radius: 10px; padding: 11px 12px; font: inherit; font-size: 16px; /* 16px stops iOS zoom */
@@ -266,3 +266,22 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 }
 .toast-action { display: flex; align-items: center; gap: 14px; text-align: left; }
 .toast-action button { flex: none; min-height: 36px; padding: 4px 6px; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 800; cursor: pointer; }
+
+/* ---------- set picker (type a code or name) ---------- */
+.setpick { position: relative; min-width: 0; }
+.setpick-input { padding-right: 38px; text-overflow: ellipsis; }
+.clue-form .setpick-input { padding: 8px 34px 8px 10px; }
+.setpick-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 32px; height: 32px; border: 0; border-radius: 50%; background: var(--surface-2); color: var(--muted); font-size: .85rem;
+}
+.setpick-list {
+  position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30; margin: 0; padding: 4px 0; list-style: none;
+  max-height: min(50vh, 340px); overflow-y: auto; overscroll-behavior: contain;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+}
+.setpick-list li { padding: 10px 12px; display: flex; gap: 10px; align-items: baseline; cursor: pointer; color: var(--text); font-size: .95rem; }
+.setpick-list li.active, .setpick-list li:hover { background: var(--surface-2); }
+.setpick-list li[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--accent); }
+.setpick-code { min-width: 3.4em; color: var(--accent); font-variant-numeric: tabular-nums; }
+.setpick-list .setpick-none { color: var(--muted); cursor: default; font-size: .85rem; }

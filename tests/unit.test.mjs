@@ -293,3 +293,26 @@ test('card details: callers asking at once share one download', async () => {
     globalThis.fetch = realFetch;
   }
 });
+
+test('set picker filters by code or name', async () => {
+  const { filterSets, setLabel } = await import('../js/setpicker.js');
+  const list = [
+    { id: 'me05', name: 'Pitch Black', code: 'PBL' },
+    { id: 'me03', name: 'Perfect Order', code: 'POR' },
+    { id: 'sv08.5', name: 'Prismatic Evolutions', code: 'PRE' },
+    { id: 'sv04', name: 'Paradox Rift', code: 'PAR' },
+    { id: 'swsh7', name: 'Evolving Skies', code: 'EVS' },
+    { id: 'xy12', name: 'Evolutions', code: 'EVO' },
+    { id: 'base2', name: 'Jungle', code: 'JU' },
+    { id: 'base1', name: 'Base Set', code: 'BS' },
+  ];
+  const ids = (q) => filterSets(list, q).map((s) => s.id);
+  assert.deepEqual(ids('p'), ['me05', 'me03', 'sv08.5', 'sv04']); // codes starting with P, newest first
+  assert.deepEqual(ids('po'), ['me03']);
+  assert.deepEqual(ids('POR'), ['me03']);
+  assert.deepEqual(ids('ev').slice(0, 2), ['swsh7', 'xy12']);
+  assert.deepEqual(ids('jung'), ['base2']);
+  assert.deepEqual(ids('perfect'), ['me03']);
+  assert.equal(ids('').length, list.length);
+  assert.equal(setLabel(list[1]), 'POR · Perfect Order');
+});
