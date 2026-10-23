@@ -419,9 +419,9 @@ await shot('fair');
     );
   const range = await page.$eval('#trade-rate', (r) => [r.min, r.max, r.step].join(','));
   t.check('trade value slider goes from 100% down to 80% in 1% steps', range === '80,100,1', range);
-  const sliderBefore = await page.evaluate(() => document.querySelector('#trade-rate'));
+  await page.evaluate(() => (document.querySelector('#trade-rate').dataset.mark = 'before'));
   await slide(80, false); // mid-drag: numbers update, the slider element stays the same
-  const sameSlider = await page.evaluate((el) => el === document.querySelector('#trade-rate'), sliderBefore);
+  const sameSlider = await page.evaluate(() => document.querySelector('#trade-rate').dataset.mark === 'before');
   let r = await state();
   t.check(
     'slider at 80% on your cards: $28.00 counts as $22.40 while dragging',
