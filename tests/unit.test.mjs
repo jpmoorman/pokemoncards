@@ -40,6 +40,9 @@ test('cleans name lines', () => {
   assert.equal(cleanNameLine('Item Finder'), 'Item Finder');
   const n = pickName([{ text: 'STAGE2', height: 20 }, { text: 'Charizard ex HP 330', height: 60 }, { text: 'Evolves from Charmeleon', height: 14 }]);
   assert.equal(n.best, 'Charizard ex');
+  // Artwork junk read as big letters loses to the real name.
+  assert.equal(pickName([{ text: 'Mewtwo ex', height: 50, conf: 92 }, { text: 'EE 2 a', height: 70, conf: 40 }]).best, 'Mewtwo ex');
+  assert.equal(pickName([{ text: 'Mewtwo ex', height: 50, conf: 92 }, { text: 'Wo ae', height: 80, conf: 35 }]).best, 'Mewtwo ex');
 });
 
 test('similarity tolerates OCR noise', () => {
@@ -136,4 +139,24 @@ test('variant prices: 1st edition / shadowless base set', () => {
 test('search query pads number like the card print', () => {
   const card = fx('card-sv03-001.json');
   assert.equal(searchQuery(card, variantPrices(card)[0]), 'Oddish 001/197 Obsidian Flames');
+});
+
+test('30th Celebration: digit set code, OCR O/0 mix-up', () => {
+  const r = parseBottomText('I 30C EN 157/128 ★');
+  assert.deepEqual(r.setCodes, ['30C']);
+  assert.deepEqual(r.numbers[0], { prefix: '', num: 157, total: 128 });
+  assert.equal(top({ nameBest: 'Mewtwo ex', numbers: [{ prefix: '', num: 157, total: 128 }], setCodes: ['3OC'] }), '30th-157');
+  assert.equal(top({ numbers: [{ prefix: '', num: 157, total: null }], setCodes: ['30C'] }), '30th-157');
+});
+
+test('newest Mega Evolution sets match by code', () => {
+  assert.equal(top({ numbers: [{ prefix: '', num: 120, total: 84 }], setCodes: ['PBL'] }), 'me05-120');
+  assert.equal(top({ numbers: [{ prefix: '', num: 122, total: 86 }], setCodes: ['CRI'] }), 'me04-122');
+});
+
+test('brand-new card without prices yet', () => {
+  const rows = variantPrices(fx('card-30th-157.json'));
+  assert.equal(rows.length, 1);
+  assert.equal(headlinePrice(rows[0]), null);
+  assert.match(marketLinks(fx('card-30th-157.json'), rows[0]).ebaySold, /Mewtwo%20ex%20157%2F128%2030th%20Celebration/);
 });

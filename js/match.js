@@ -90,10 +90,13 @@ export function buildIndex(cards, sets) {
  * setAbbr: Map/obj setId -> official code ("OBF")
  * Returns [{ card, set, score, reasons }] best first.
  */
+// OCR mixes up O and 0 ("3OC" for "30C"), so compare codes with both folded to 0.
+const codeKey = (c) => String(c || '').toUpperCase().replace(/O/g, '0');
+
 export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
   const abbrOf = (setId) => (setAbbr instanceof Map ? setAbbr.get(setId) : setAbbr[setId]) || null;
-  const codes = new Set((clues.setCodes || []).map((c) => c.toUpperCase()));
-  const looseCodes = new Set((clues.codeCandidates || []).map((c) => c.toUpperCase()));
+  const codes = new Set((clues.setCodes || []).map(codeKey));
+  const looseCodes = new Set((clues.codeCandidates || []).map(codeKey));
   const nameBest = clues.nameBest || '';
   const nameAll = clues.nameAll || '';
   const hasName = !!(nameBest || nameAll);
@@ -112,10 +115,10 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
     const set = index.setsById.get(card.setId);
     let s = 0;
     const abbr = abbrOf(card.setId);
-    if (abbr && codes.has(abbr)) {
+    if (abbr && codes.has(codeKey(abbr))) {
       s += 4;
       reasons.push(`set code ${abbr}`);
-    } else if (abbr && looseCodes.has(abbr)) {
+    } else if (abbr && looseCodes.has(codeKey(abbr))) {
       s += 2;
       reasons.push(`set code ${abbr}?`);
     }

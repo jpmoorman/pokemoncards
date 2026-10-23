@@ -320,8 +320,13 @@ function renderDetail() {
     .join(' · ');
 
   const hp = headlinePrice(row);
-  $('.headline-price', node).textContent = hp ? formatMoney(hp.value, hp.currency) : 'No price data';
-  $('.headline-source', node).textContent = hp ? `${hp.source} · ${row?.label || ''}` : 'Try the eBay sold listings below.';
+  const anyPrice = rows.some((r) => headlinePrice(r));
+  $('.headline-price', node).textContent = hp ? formatMoney(hp.value, hp.currency) : 'No price yet';
+  $('.headline-source', node).textContent = hp
+    ? `${hp.source} · ${row?.label || ''}`
+    : anyPrice
+      ? 'No price for this version. Try another version or eBay sold listings.'
+      : 'Price sites have no data for this card yet (common for brand-new sets). Check eBay sold listings below.';
 
   // Variant chips (dedupe identical labels).
   const chips = $('.variant-chips', node);

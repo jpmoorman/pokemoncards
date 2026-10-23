@@ -125,16 +125,18 @@ export async function getCard(id) {
 }
 
 /**
- * Official set codes ("OBF", "POR") printed on Scarlet & Violet and newer cards.
- * Only the full set endpoint has them, so fetch modern sets once and cache forever.
+ * Official set codes ("OBF", "POR", "30C") printed on Scarlet & Violet and newer cards.
+ * Only the full set endpoint has them, so fetch modern sets once and cache them.
  */
 export async function getSetAbbreviations(sets) {
   // stored as setId -> { code, t }; sets without a code yet are re-checked weekly
   const stored = (await kvGet('setAbbr')) || {};
   const week = 7 * 24 * 3600 * 1000;
-  const todo = sets.filter(
-    (s) => /^(sv|me)/i.test(s.id) && !(stored[s.id] && (stored[s.id].code || Date.now() - stored[s.id].t < week)),
-  );
+  // `sets` is in release order; codes are printed from Scarlet & Violet (sv01) onward,
+  // including sets with ids like "30th" that don't follow the sv/me naming.
+  const firstModern = sets.findIndex((s) => s.id === 'sv01');
+  const modern = ( firstModern >= 0 ? sets.slice(firstModern) : sets.filter((s) => /^(sv|me)/i.test(s.id))).filter((s) => !isPocketSet(s.id));
+  const todo = modern.filter((s) => !(stored[s.id] && (stored[s.id].code || Date.now() - stored[s.id].t < week)));
   if (todo.length) {
     const queue = [...todo];
     const worker = async () => {

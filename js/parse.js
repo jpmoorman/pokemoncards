@@ -84,8 +84,8 @@ export function parseBottomText(text) {
 
   // Loose 3-letter uppercase tokens; matched against known set codes later.
   const codeCandidates = [];
-  for (const m of t.matchAll(/\b([A-Z]{3})\b/g)) {
-    if (!setCodes.includes(m[1]) && !codeCandidates.includes(m[1])) codeCandidates.push(m[1]);
+  for (const m of t.matchAll(/\b([A-Z0-9]{3})\b/g)) {
+    if (/[A-Z]/.test(m[1]) && !setCodes.includes(m[1]) && !codeCandidates.includes(m[1])) codeCandidates.push(m[1]);
   }
 
   return { numbers, setCodes, codeCandidates };
@@ -114,7 +114,9 @@ export function cleanNameLine(line) {
     .replace(/\s+/g, ' ')
     .trim();
   const n = normalize(s);
-  if (!n || FRAME_WORDS.has(n) || n.replace(/ /g, '').length < 3) return '';
+  if (!n || FRAME_WORDS.has(n)) return '';
+  // Needs at least one real word; artwork often reads as junk like "EE a".
+  if (!/[a-z]{3,}/i.test(s)) return '';
   // Strip leading frame labels glued to the name ("BASIC Pikachu"). Labels are
   // printed in capitals, which keeps names like "Item Finder" intact.
   s = s.replace(/^(BASIC|STAGE|TRAINER|SUPPORTER|ITEM|STADIUM)\s+/, '');
@@ -123,14 +125,18 @@ export function cleanNameLine(line) {
 
 /**
  * Pick the most likely name text from OCR lines of the top of the card.
- * lines: [{ text, height }]. The card name is printed in the biggest font.
+ * lines: [{ text, height, conf? }]. The card name is printed in the biggest font;
+ * OCR confidence (0-100) damps tall-but-garbled reads of the artwork.
  * Returns { best, all } where `all` joins every cleaned line.
  */
 export function pickName(lines) {
   const cleaned = (lines || [])
-    .map((l) => ({ text: cleanNameLine(l.text), height: l.height || 0 }))
+    .map((l) => {
+      const conf = l.conf == null ? 100 : l.conf;
+      return { text: cleanNameLine(l.text), score: (l.height || 0) * Math.min(1, Math.max(0.2, conf / 90)) };
+    })
     .filter((l) => l.text);
   if (!cleaned.length) return { best: '', all: '' };
-  const tallest = [...cleaned].sort((a, b) => b.height - a.height)[0];
+  const tallest = [...cleaned].sort((a, b) => b.score - a.score)[0];
   return { best: tallest.text, all: cleaned.map((l) => l.text).join(' ') };
 }

@@ -7,10 +7,11 @@ A free web app for your phone: point the camera at a Pokémon card and it identi
 1. Text recognition ([Tesseract.js](https://github.com/naptha/tesseract.js)) runs **on your phone**. It reads the card's
    - **name** (the biggest text at the top),
    - **collector number and set size** (`125/197`, `4/102`, `TG05/TG30`, `SWSH050`),
-   - **set code** printed on Scarlet & Violet and Mega Evolution cards (`OBF EN`, `POR EN`, …).
+   - **set code** printed on Scarlet & Violet and newer cards (`OBF EN`, `POR EN`, `PBL EN`, `30C EN`, …).
 2. Those clues are matched against every English card ever printed, from Base Set to the newest sets.
    Older cards that only have a set *symbol* are matched by **set size + number + name**
    (for example, `4/102` + "Charizard" can only be Base Set Charizard).
+   New sets show up automatically: the set list comes live from the card database.
 3. You get the best match plus other likely matches with pictures. Tap one if the first guess is wrong.
    You can also correct what the camera read and tap **Re-match**.
 
@@ -22,7 +23,7 @@ Each printed version gets its own price: Normal, Reverse Holo, Holo, **1st Editi
 - One-tap links to **eBay sold listings** (what cards actually sold for), eBay active listings, TCGplayer and
   PriceCharting (graded values).
 
-Card data and prices come from the free [TCGdex API](https://tcgdex.dev). eBay doesn't offer a free API that works from a browser, so the app opens eBay's own search, filtered to sold listings.
+Card data and prices come from the free [TCGdex API](https://tcgdex.dev). Brand-new sets can take a few weeks to get prices; until then the app says "No price yet" and points you to eBay sold listings. eBay doesn't offer a free API that works from a browser, so the app opens eBay's own search, filtered to sold listings.
 
 **Also included:** manual search, a collection list with a running total, CSV export, and works offline after the first load. You can add it to your home screen like a normal app.
 

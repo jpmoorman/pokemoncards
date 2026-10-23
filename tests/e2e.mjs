@@ -123,6 +123,11 @@ const cases = [
     expect: { name: 'Charizard', set: 'Base Set', price: '$954.65' },
   },
   {
+    label: '30th Celebration card (30C set code, no prices yet)',
+    spec: { border: '#c9ccd1', inner: '#f1ede3', stage: 'BASIC', name: 'Mewtwo ex', hp: 'HP 230', bottomLeft: 'I  30C EN  157/128 ★', attack: 'Photon Bullets', illus: 'Illus. YOSHIROTTEN' },
+    expect: { name: 'Mewtwo ex', set: '30th Celebration', price: 'No price yet' },
+  },
+  {
     label: 'Phone photo of a card on a table (not cropped)',
     spec: { border: '#c9ccd1', inner: '#f1ede3', stage: 'STAGE 2', name: 'Charizard ex', hp: 'HP 330', evolves: 'Evolves from Charmeleon', bottomLeft: 'G  OBF EN  125/197 ★', scale: 3, photo: { fill: 0.72, rotate: 2, blur: 1 } },
     expect: { name: 'Charizard ex', set: 'Obsidian Flames', price: '$5.28' },
