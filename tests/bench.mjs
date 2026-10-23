@@ -67,8 +67,29 @@ for (const [i, l] of todo.entries()) {
     const started = performance.now();
     try {
       const canvas = await fileToCanvas(blob);
-      const { ranked, clues, debug } = await identify(canvas);
+      const { ranked, clues, debug, card } = await identify(canvas);
+      // Border colour of the straightened card (yellow = WOTC..SWSH era, silver = SV/ME era).
+      let border = null;
+      if (card?.width) {
+        const c2 = document.createElement('canvas');
+        c2.width = 63;
+        c2.height = 88;
+        const g = c2.getContext('2d', { willReadFrequently: true });
+        g.drawImage(card, 0, 0, 63, 88);
+        const px = g.getImageData(0, 0, 63, 88).data;
+        let r = 0, gg = 0, b = 0, n = 0;
+        for (let y = 0; y < 88; y++) for (let x = 0; x < 63; x++) {
+          const edge = x < 3 || x > 59 || y < 3 || y > 84;
+          if (!edge) continue;
+          const i = (y * 63 + x) * 4;
+          r += px[i]; gg += px[i + 1]; b += px[i + 2]; n++;
+        }
+        border = [Math.round(r / n), Math.round(gg / n), Math.round(b / n)];
+      }
       return {
+        clues,
+        debug: { name: debug.name, bottom: debug.bottom, full: debug.full, art: debug.art, detect: debug.detect, reads: debug.reads },
+        border,
         ms: Math.round(performance.now() - started),
         top: ranked.slice(0, 5).map((x) => x.card.id),
         score: ranked[0]?.score ?? null,
