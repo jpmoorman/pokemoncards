@@ -1,6 +1,6 @@
 // Camera capture, image clean-up and on-device text recognition (Tesseract.js).
 import { parseBottomText, pickName } from './parse.js';
-import { CARD_ASPECT, detectCard, warpCard, rotateCorners, quadSize } from './detect.js';
+import { CARD_ASPECT, detectCard, warpCard, rotateCorners } from './detect.js';
 
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js';
 
@@ -12,6 +12,9 @@ export const NAME_REGION = { x: 0.0, y: 0.0, w: 0.86, h: 0.17 };
 export const BOTTOM_REGION = { x: 0.0, y: 0.84, w: 1.0, h: 0.16 };
 // Artwork window; set-logo and other stamps sit in its lower part.
 export const ART_REGION = { x: 0.04, y: 0.09, w: 0.92, h: 0.42 };
+// Lower artwork plus the strip under it, read for stamps: set logos sit in the art's
+// lower-right corner (often over its edge), the 1st Edition stamp just below its lower-left.
+export const STAMP_REGION = { x: 0.03, y: 0.25, w: 0.97, h: 0.34 };
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -318,16 +321,18 @@ async function readAreas(worker, card, onStatus, isKnown) {
   return { name, nameText, bottom, bottomText };
 }
 
+// Keep a sliver around a found card, in case an edge was found on its inner frame.
+const WARP_MARGIN = 0.015;
+
 /** Card-shaped images to read, best guess first: straightened card(s), then the picture as is. */
 function cardViews(canvas, found) {
   const views = [];
   if (found) {
-    views.push({ card: warpCard(canvas, found.corners), how: 'found' });
-    if (found.landscape) views.push({ card: warpCard(canvas, rotateCorners(found.corners, 2)), how: 'turned' });
-    const { w } = quadSize(found.corners);
-    // Next-best outline when it is clearly different (e.g. the card vs. its toploader).
-    const alt = found.candidates.find((c) => Math.max(...c.map((p, i) => Math.hypot(p.x - found.corners[i].x, p.y - found.corners[i].y))) > 0.06 * w);
-    if (alt) views.push({ card: warpCard(canvas, alt), how: 'alternative' });
+    views.push({ card: warpCard(canvas, found.corners, { margin: WARP_MARGIN }), how: 'found' });
+    if (found.landscape) views.push({ card: warpCard(canvas, rotateCorners(found.corners, 2), { margin: WARP_MARGIN }), how: 'turned' });
+    // Next-best outline (e.g. the toploader when we picked the card, or the other way round).
+    const alt = found.candidates[0];
+    if (alt) views.push({ card: warpCard(canvas, alt, { margin: WARP_MARGIN }), how: 'alternative' });
   }
   // Camera guide crops are already the card.
   if (looksLikeCard(canvas) && !(found && found.area > 0.8)) views.push({ card: canvas, how: 'as is' });
@@ -341,11 +346,13 @@ function cardViews(canvas, found) {
  *     optional dictionary lookup (identify.js passes the catalog). Finds a known card
  *     name inside OCR text; undefined means "can't tell" (catalog not loaded yet).
  * Returns {
- *   clues: { nameBest, nameAll, numbers, setCodes, codeCandidates },
- *   debug: { name, bottom, full, detect } raw OCR text per area + how the card was found,
- *   card:  the straightened card as a canvas (portrait, ~600–1000 px wide), or null when
- *          no card was found in a photo. Areas are fractions of it (NAME_REGION,
- *          BOTTOM_REGION, ART_REGION); OCR more of it with readRegion(card, region).
+ *   clues: { nameBest, nameAll, numbers, setCodes, codeCandidates, artText },
+ *          artText: what was read on the lower artwork (STAMP_REGION), for stamps.js
+ *   debug: { name, bottom, full, art, detect } raw OCR text per area + how the card was found,
+ *   card:  the straightened card as a canvas (portrait, ~600–1000 px wide, 1.5% margin);
+ *          a camera guide crop with no outline found is used as is; null when no card
+ *          was found in a photo. Areas are fractions of it (NAME_REGION, BOTTOM_REGION,
+ *          ART_REGION); OCR more of it with readRegion(card, region), e.g. for stamps.
  * }
  */
 export async function readCard(canvas, onStatus, opts = {}) {
@@ -361,7 +368,12 @@ export async function readCard(canvas, onStatus, opts = {}) {
   debug.detect = found ? `card found (score ${found.score.toFixed(2)}, ${found.ms} ms)` : 'no card outline found';
   const views = cardViews(canvas, found);
 
-  const lookup = (text) => (opts.findName && text ? opts.findName(text) : undefined);
+  const seen = new Map();
+  const lookup = (text) => {
+    if (!opts.findName || !text) return undefined;
+    if (!seen.has(text)) seen.set(text, opts.findName(text));
+    return seen.get(text);
+  };
   const isKnown = (text) => {
     const k = lookup(text);
     return k === undefined ? !!text : !!k && k.score >= 0.75;
@@ -388,7 +400,8 @@ export async function readCard(canvas, onStatus, opts = {}) {
   let fullText = '';
   if (!bottom.numbers.length || !isKnown(name.best)) {
     onStatus?.('Reading whole card…');
-    const src = card || canvas;
+    // Nothing usable from any outline: maybe it wasn't the card, so read the whole picture.
+    const src = bottom.numbers.length || isKnown(name.best) ? card || canvas : canvas;
     const full = enhance(crop(src, { x: 0, y: 0, w: 1, h: 1 }, Math.min(2000, Math.max(1200, src.width))));
     const res = await recognize(worker, full, 11);
     debug.full = res.text;
@@ -403,29 +416,35 @@ export async function readCard(canvas, onStatus, opts = {}) {
     }
   }
 
-  // The name read is garbage (glare, a sticker…) or has extra words: use the known
-  // card name found in what we read, name area first.
-  if (opts.findName && !lookupExact(lookup, name.best)) {
-    const hit = [name.best, nameText, fullText].map(lookup).find((k) => k && k.score >= 0.75);
-    if (hit && hit.name !== name.best) {
+  // The name read is garbage (glare, a sticker…): use a known card name found in what
+  // we read, name area first.
+  if (opts.findName && !isKnown(name.best)) {
+    const hit = [nameText, fullText].map(lookup).find((k) => k && k.score >= 0.75);
+    if (hit) {
       if (!name.all.includes(name.best)) name.all = [name.best, name.all].filter(Boolean).join(' ');
       name.best = hit.name;
       debug.nameFrom = 'dictionary';
     }
   }
 
+  // Stamps (set logo, 1st Edition, Play! Pokémon…) tell the versions apart; stamps.js reads them.
+  let artText = '';
+  if (card) {
+    onStatus?.('Checking for stamps…');
+    try {
+      const res = await recognize(worker, enhance(crop(card, STAMP_REGION, 1400)), 11);
+      artText = res.text.replace(/\n\s*\n/g, '\n').trim();
+    } catch (e) {
+      console.warn('artwork read failed', e);
+    }
+    debug.art = artText;
+  }
+
   return {
-    clues: { nameBest: name.best, nameAll: name.all, ...bottom },
+    clues: { nameBest: name.best, nameAll: name.all, ...bottom, artText },
     debug,
     card,
   };
-}
-
-/** The read is (nearly) a card name all by itself, e.g. "Charizard ex" or "Charlzard ex". */
-function lookupExact(lookup, text) {
-  const k = lookup(text);
-  if (k === undefined) return true;
-  return !!k && k.score >= 0.75 && Math.abs(k.name.length - text.length) <= 2;
 }
 
 function mergeBottom(a, b) {

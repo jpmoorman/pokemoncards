@@ -4,7 +4,7 @@ import { getCard, setSymbol } from './api.js';
 import { rankCandidates, confidence } from './match.js';
 import { variantPrices, headlinePrice, formatMoney, marketLinks, printedNumber, variantImage, eurToUsd } from './prices.js';
 import { catalog, catalogReady, abbrReady, setOptions } from './catalog.js';
-import { chooseVariant } from './stamps.js';
+import { pickVariant } from './stamps.js';
 import { cardTile } from './components.js';
 import { makeEntry } from './entry.js';
 import { fx } from './fx.js';
@@ -165,8 +165,8 @@ async function showCard(id, opts = {}) {
     return;
   }
   const rows = variantPrices(card);
-  const rowIdx = chooseVariant(rows, { card, clues: opts.clues || null, preferred: opts.preferred });
-  sheet.current = { card, rows, rowIdx };
+  const pick = pickVariant(rows, { card, clues: opts.clues || null, preferred: opts.preferred });
+  sheet.current = { card, rows, rowIdx: pick.index, pick };
   renderDetail();
 }
 
@@ -239,6 +239,9 @@ function renderDetail() {
     );
   });
   if (!rows.length) chips.append(el('span', { class: 'muted small' }, 'No version data for this card.'));
+  // Why this version: a stamp spotted on the card, or stamped versions worth checking.
+  const pick = sheet.current.pick;
+  if (pick?.reason && rowIdx === pick.index) chips.after(el('p', { class: `small variant-reason${pick.stamps.length ? ' found' : ''}` }, pick.reason));
 
   // Price tables, all USD.
   const tables = $('.price-tables', node);

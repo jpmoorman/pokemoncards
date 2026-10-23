@@ -83,49 +83,54 @@ export function applyHomography(h, x, y) {
  * pixels that fall outside the source are filled with `fill`.
  */
 export function warpImageData(src, h, width, height, fill = [245, 245, 245]) {
-  const out = new Uint8ClampedArray(width * height * 4);
+  const data = new Uint8ClampedArray(width * height * 4);
+  const out = new Uint32Array(data.buffer); // one write per pixel (little-endian RGBA)
+  const blank = (255 << 24) | (fill[2] << 16) | (fill[1] << 8) | fill[0];
   const sw = src.width;
   const sh = src.height;
   const d = src.data;
+  const SPAN = 16; // exact perspective every 16 px, linear in between (error ≪ 0.1 px)
   let o = 0;
   for (let y = 0; y < height; y++) {
     const yc = y + 0.5;
-    // Row start in homogeneous coordinates; step along x is (h0, h3, h6).
-    let X = h[0] * 0.5 + h[1] * yc + h[2];
-    let Y = h[3] * 0.5 + h[4] * yc + h[5];
     let W = h[6] * 0.5 + h[7] * yc + h[8];
-    for (let x = 0; x < width; x++, o += 4) {
-      const sx = X / W - 0.5;
-      const sy = Y / W - 0.5;
-      X += h[0];
-      Y += h[3];
-      W += h[6];
-      const x0 = Math.floor(sx);
-      const y0 = Math.floor(sy);
-      if (x0 < 0 || y0 < 0 || x0 >= sw - 1 || y0 >= sh - 1) {
-        out[o] = fill[0];
-        out[o + 1] = fill[1];
-        out[o + 2] = fill[2];
-        out[o + 3] = 255;
-        continue;
+    let ax = (h[0] * 0.5 + h[1] * yc + h[2]) / W - 0.5;
+    let ay = (h[3] * 0.5 + h[4] * yc + h[5]) / W - 0.5;
+    for (let x0 = 0; x0 < width; x0 += SPAN) {
+      const n = Math.min(SPAN, width - x0);
+      const xe = x0 + n + 0.5;
+      W = h[6] * xe + h[7] * yc + h[8];
+      const bx = (h[0] * xe + h[1] * yc + h[2]) / W - 0.5;
+      const by = (h[3] * xe + h[4] * yc + h[5]) / W - 0.5;
+      const stepX = (bx - ax) / n;
+      const stepY = (by - ay) / n;
+      let sx = ax;
+      let sy = ay;
+      for (let k = 0; k < n; k++, o++, sx += stepX, sy += stepY) {
+        const ix = sx | 0;
+        const iy = sy | 0;
+        if (sx < 0 || sy < 0 || ix >= sw - 1 || iy >= sh - 1) {
+          out[o] = blank;
+          continue;
+        }
+        const fx = sx - ix;
+        const fy = sy - iy;
+        const i00 = (iy * sw + ix) << 2;
+        const i01 = i00 + (sw << 2);
+        const w11 = fx * fy;
+        const w10 = fx - w11;
+        const w01 = fy - w11;
+        const w00 = 1 - fx - w01;
+        const r = d[i00] * w00 + d[i00 + 4] * w10 + d[i01] * w01 + d[i01 + 4] * w11;
+        const g = d[i00 + 1] * w00 + d[i00 + 5] * w10 + d[i01 + 1] * w01 + d[i01 + 5] * w11;
+        const b = d[i00 + 2] * w00 + d[i00 + 6] * w10 + d[i01 + 2] * w01 + d[i01 + 6] * w11;
+        out[o] = 0xff000000 | ((b + 0.5) << 16) | ((g + 0.5) << 8) | (r + 0.5);
       }
-      const fx = sx - x0;
-      const fy = sy - y0;
-      const i00 = (y0 * sw + x0) * 4;
-      const i10 = i00 + 4;
-      const i01 = i00 + sw * 4;
-      const i11 = i01 + 4;
-      const w00 = (1 - fx) * (1 - fy);
-      const w10 = fx * (1 - fy);
-      const w01 = (1 - fx) * fy;
-      const w11 = fx * fy;
-      out[o] = d[i00] * w00 + d[i10] * w10 + d[i01] * w01 + d[i11] * w11;
-      out[o + 1] = d[i00 + 1] * w00 + d[i10 + 1] * w10 + d[i01 + 1] * w01 + d[i11 + 1] * w11;
-      out[o + 2] = d[i00 + 2] * w00 + d[i10 + 2] * w10 + d[i01 + 2] * w01 + d[i11 + 2] * w11;
-      out[o + 3] = 255;
+      ax = bx;
+      ay = by;
     }
   }
-  return { width, height, data: out };
+  return { width, height, data };
 }
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -163,73 +168,83 @@ function insideQuad(c, p, margin = 0) {
  * Thin edges of an RGBA image: Sobel on each colour channel (so a yellow border on a
  * brown table counts even at equal brightness), strongest channel wins, then
  * non-maximum suppression. Returns { width, height, mag, ori, edge } where ori is
- * the edge normal in whole degrees 0..179 and edge marks pixels kept as edges.
+ * the edge normal in whole degrees 0..179 and edge is 0 (none) or 1..3 (strength).
  */
 export function edgeMap(img) {
   const { width: w, height: h, data } = img;
   const n = w * h;
-  const chans = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
-  const tmp = new Float32Array(n);
-  for (let c = 0; c < 3; c++) {
-    const ch = chans[c];
-    for (let i = 0; i < n; i++) ch[i] = data[i * 4 + c];
-    blur121(ch, tmp, w, h);
+  const r = new Float32Array(n);
+  const g = new Float32Array(n);
+  const b = new Float32Array(n);
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    r[i] = data[j];
+    g[i] = data[j + 1];
+    b[i] = data[j + 2];
   }
+  const tmp = new Float32Array(n);
+  blur121(r, tmp, w, h);
+  blur121(g, tmp, w, h);
+  blur121(b, tmp, w, h);
   const mag = new Float32Array(n);
   const gxA = new Float32Array(n);
   const gyA = new Float32Array(n);
+  const hist = new Uint32Array(256);
+  hist[0] = 2 * w + 2 * h - 4; // border pixels
   for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      let best = -1;
-      let bx = 0;
-      let by = 0;
-      for (let c = 0; c < 3; c++) {
-        const p = chans[c];
-        const gx = p[i - w + 1] + 2 * p[i + 1] + p[i + w + 1] - p[i - w - 1] - 2 * p[i - 1] - p[i + w - 1];
-        const gy = p[i + w - 1] + 2 * p[i + w] + p[i + w + 1] - p[i - w - 1] - 2 * p[i - w] - p[i - w + 1];
-        const m = gx * gx + gy * gy;
-        if (m > best) {
-          best = m;
-          bx = gx;
-          by = gy;
-        }
+    for (let x = 1, i = y * w + 1; x < w - 1; x++, i++) {
+      const a = i - w;
+      const c = i + w;
+      let gx = r[a + 1] + 2 * r[i + 1] + r[c + 1] - r[a - 1] - 2 * r[i - 1] - r[c - 1];
+      let gy = r[c - 1] + 2 * r[c] + r[c + 1] - r[a - 1] - 2 * r[a] - r[a + 1];
+      let m = gx * gx + gy * gy;
+      const gx2 = g[a + 1] + 2 * g[i + 1] + g[c + 1] - g[a - 1] - 2 * g[i - 1] - g[c - 1];
+      const gy2 = g[c - 1] + 2 * g[c] + g[c + 1] - g[a - 1] - 2 * g[a] - g[a + 1];
+      const m2 = gx2 * gx2 + gy2 * gy2;
+      if (m2 > m) {
+        m = m2;
+        gx = gx2;
+        gy = gy2;
       }
-      mag[i] = Math.sqrt(best) / 4;
-      gxA[i] = bx;
-      gyA[i] = by;
-    }
-  }
-  // Non-maximum suppression along the gradient, then an adaptive threshold.
-  const ori = new Uint8Array(n);
-  const edge = new Uint8Array(n);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      const m = mag[i];
-      if (m < 4) continue;
-      let a = Math.atan2(gyA[i], gxA[i]) / DEG;
-      if (a < 0) a += 180;
-      let o = Math.round(a);
-      if (o >= 180) o -= 180;
-      ori[i] = o;
-      // Neighbours along the gradient direction (4 sectors).
-      let j;
-      if (a < 22.5 || a >= 157.5) j = 1;
-      else if (a < 67.5) j = w + 1;
-      else if (a < 112.5) j = w;
-      else j = w - 1;
-      if (m >= mag[i + j] && m > mag[i - j]) edge[i] = 1;
+      const gx3 = b[a + 1] + 2 * b[i + 1] + b[c + 1] - b[a - 1] - 2 * b[i - 1] - b[c - 1];
+      const gy3 = b[c - 1] + 2 * b[c] + b[c + 1] - b[a - 1] - 2 * b[a] - b[a + 1];
+      const m3 = gx3 * gx3 + gy3 * gy3;
+      if (m3 > m) {
+        m = m3;
+        gx = gx3;
+        gy = gy3;
+      }
+      const v = Math.sqrt(m) / 4;
+      mag[i] = v;
+      gxA[i] = gx;
+      gyA[i] = gy;
+      hist[v < 255 ? v | 0 : 255]++;
     }
   }
   // Keep edges well above the scene's own texture: a carpet or wood grain raises the
   // bar, a plain table lets a faint silver border through.
-  const hist = new Uint32Array(256);
-  for (let i = 0; i < n; i++) hist[Math.min(255, mag[i] | 0)]++;
   let median = 0;
   for (let acc = 0; median < 255 && (acc += hist[median]) < n / 2; median++);
   const thr = Math.max(5, 3 * median);
-  for (let i = 0; i < n; i++) if (edge[i] && mag[i] < thr) edge[i] = 0;
+  // Non-maximum suppression along the gradient (4 sectors, tan 22.5° = 0.4142).
+  // Skip a 3 px frame: the picture's own border (scans, blur at the edges) isn't a card.
+  const ori = new Uint8Array(n);
+  const edge = new Uint8Array(n);
+  for (let y = 3; y < h - 3; y++) {
+    for (let x = 3, i = y * w + 3; x < w - 3; x++, i++) {
+      const m = mag[i];
+      if (m < thr) continue;
+      const gx = gxA[i];
+      const gy = gyA[i];
+      const ax = Math.abs(gx);
+      const ay = Math.abs(gy);
+      const j = ay <= 0.4142 * ax ? 1 : ax <= 0.4142 * ay ? w : gx * gy > 0 ? w + 1 : w - 1;
+      if (m < mag[i + j] || m <= mag[i - j]) continue;
+      edge[i] = m < 2 * thr ? 1 : m < 3 * thr ? 2 : 3; // strength, for weighted Hough votes
+      let o = Math.round(Math.atan2(gy, gx) / DEG);
+      if (o < 0) o += 180;
+      ori[i] = o >= 180 ? o - 180 : o;
+    }
+  }
   return { width: w, height: h, mag, ori, edge };
 }
 
@@ -268,12 +283,13 @@ export function houghLines(em, { maxLines = 40, minVotes } = {}) {
       const i = y * w + x;
       if (!edge[i]) continue;
       const o = ori[i];
+      const v = edge[i]; // strong edges (a card against the table) outvote texture
       // Vote only near the pixel's own edge direction: fast and far less noisy.
       for (let d = -2; d <= 2; d++) {
         let t = o + d;
         if (t < 0) t += NT;
         else if (t >= NT) t -= NT;
-        acc[t * nr + Math.round(x * COS[t] + y * SIN[t]) + diag]++;
+        acc[t * nr + Math.round(x * COS[t] + y * SIN[t]) + diag] += v;
       }
     }
   }
@@ -321,6 +337,7 @@ function lineCoverage(em, line) {
   const diag = Math.ceil(Math.hypot(w, h));
   const n = 2 * diag + 1;
   const cum = new Uint16Array(n + 1);
+  const strict = new Uint16Array(n + 1); // ±1 px, ±6°: for "does the line run on past the corner"
   const dx = -line.ny;
   const dy = line.nx;
   const px = line.rho * line.nx;
@@ -329,16 +346,21 @@ function lineCoverage(em, line) {
     const bx = px + (s - diag) * dx;
     const by = py + (s - diag) * dy;
     let hit = 0;
-    for (let k = -2; k <= 2 && !hit; k++) {
+    let tight = 0;
+    for (let k = -2; k <= 2; k++) {
       const x = Math.round(bx + k * line.nx);
       const y = Math.round(by + k * line.ny);
       if (x < 0 || y < 0 || x >= w || y >= h) continue;
       const i = y * w + x;
-      if (edge[i] && angDiff(ori[i], line.t) <= 12) hit = 1;
+      if (!edge[i]) continue;
+      const da = angDiff(ori[i], line.t);
+      if (da <= 12) hit = 1;
+      if (da <= 6 && k >= -1 && k <= 1) tight = 1;
     }
     cum[s + 1] = cum[s] + hit;
+    strict[s + 1] = strict[s] + tight;
   }
-  return { cum, diag, dx, dy, px, py };
+  return { cum, strict, diag, dx, dy, px, py };
 }
 
 /** Fraction of the segment a→b (both on the line) backed by edges, ignoring the rounded corners. */
@@ -350,6 +372,39 @@ function segmentSupport(cov, a, b) {
   const lo = Math.max(0, Math.min(cov.cum.length - 1, Math.round(sa + trim)));
   const hi = Math.max(0, Math.min(cov.cum.length - 1, Math.round(sb - trim)));
   return hi > lo ? (cov.cum[hi] - cov.cum[lo]) / (hi - lo) : 0;
+}
+
+/** Fraction of the line from `from` to `to` px past point `a` (along the side's direction) tightly backed by edges. */
+function rangeSupport(cov, a, ux, uy, from, to) {
+  const s0 = (a.x - cov.px) * cov.dx + (a.y - cov.py) * cov.dy + cov.diag;
+  const dir = ux * cov.dx + uy * cov.dy; // ±1: which way the side runs along the line
+  let lo = s0 + dir * from;
+  let hi = s0 + dir * to;
+  if (lo > hi) [lo, hi] = [hi, lo];
+  const n = cov.strict.length - 1;
+  const l = Math.max(0, Math.min(n, Math.round(lo)));
+  const h = Math.max(0, Math.min(n, Math.round(hi)));
+  return hi - lo >= 1 ? (cov.strict[h] - cov.strict[l]) / (hi - lo) : 0;
+}
+
+/**
+ * How much the side lines run on past the corners (0..1). A real card's edges stop at
+ * its corners; an outline mixing a toploader's edges with the card's doesn't.
+ */
+function overshoot(covs, sideLine, corners) {
+  let sum = 0;
+  for (let k = 0; k < 4; k++) {
+    const a = corners[k];
+    const b = corners[(k + 1) % 4];
+    const len = dist(a, b);
+    const ux = (b.x - a.x) / len;
+    const uy = (b.y - a.y) / len;
+    const cov = covs[sideLine[k]];
+    const past = rangeSupport(cov, b, ux, uy, 0.04 * len, 0.16 * len);
+    const before = rangeSupport(cov, a, ux, uy, -0.16 * len, -0.04 * len);
+    sum += Math.max(past, before);
+  }
+  return sum / 4;
 }
 
 function intersect(a, b) {
@@ -404,10 +459,69 @@ export function findCardQuads(img, opts = {}) {
   }
   quads.sort((a, b) => b.score - a.score);
   if (!quads.length) return [];
-  const pick = preferCard(quads, img, em);
+  // A card's edge separates two different things (card vs. table). Wood grain or a
+  // clear toploader's edge has much the same on both sides: rescore the leaders.
+  const top = quads.slice(0, 30);
+  for (const q of top) {
+    q.contrast = q.corners.reduce((sum, a, k) => sum + sideContrast(img, a, q.corners[(k + 1) % 4], q.corners), 0) / 4;
+    q.score *= 0.5 + 0.5 * q.contrast;
+  }
+  top.sort((a, b) => b.score - a.score);
+  quads.splice(0, top.length, ...top);
+  const pick = preferCard(quads, img, em, o.trace);
   const ordered = [pick, ...quads.filter((q) => q !== pick)];
-  ordered[0] = refineQuad(em, ordered[0]);
+  ordered[0] = refineQuad(em, pushOut(ordered[0], lines, covs, img, em, o.trace));
   return ordered;
+}
+
+/**
+ * Could colour `c` be colour `bg` seen through clear plastic? Plastic haze blends the
+ * background towards white by the same factor in every channel; a card border's colour
+ * practically never fits that.
+ */
+export function looksHazed(c, bg) {
+  if (Math.hypot(c[0] - bg[0], c[1] - bg[1], c[2] - bg[2]) < 6) return true;
+  const alphas = [];
+  for (let k = 0; k < 3; k++) if (255 - bg[k] >= 20) alphas.push((255 - c[k]) / (255 - bg[k]));
+  if (!alphas.length) return false;
+  const lo = Math.min(...alphas);
+  const hi = Math.max(...alphas);
+  return lo >= 0.5 && hi <= 1.08 && hi - lo <= 0.15;
+}
+
+/** How clearly the side a→b separates two different things, 0..1 (thin strips just inside vs. just outside). */
+function sideContrast(img, a, b, corners) {
+  const { width: w, height: h, data } = img;
+  const len = dist(a, b) || 1;
+  let nx = -(b.y - a.y) / len;
+  let ny = (b.x - a.x) / len;
+  const c = corners.reduce((s, p) => ({ x: s.x + p.x / 4, y: s.y + p.y / 4 }), { x: 0, y: 0 });
+  if ((c.x - a.x) * nx + (c.y - a.y) * ny < 0) {
+    nx = -nx;
+    ny = -ny;
+  }
+  const inside = [[], [], []];
+  const outside = [[], [], []];
+  for (let s = 0; s <= 24; s++) {
+    const f = 0.12 + (0.76 * s) / 24;
+    const px = a.x + (b.x - a.x) * f;
+    const py = a.y + (b.y - a.y) * f;
+    for (const d of [3, 5, -3, -5]) {
+      const x = Math.round(px + nx * d);
+      const y = Math.round(py + ny * d);
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      const i = (y * w + x) * 4;
+      const to = d > 0 ? inside : outside;
+      to[0].push(data[i]);
+      to[1].push(data[i + 1]);
+      to[2].push(data[i + 2]);
+    }
+  }
+  if (inside[0].length < 8 || outside[0].length < 8) return 0;
+  const cin = inside.map(median);
+  const cout = outside.map(median);
+  if (looksHazed(cin, cout)) return 0.2; // a clear holder's edge, or grain on both sides
+  return Math.min(1, Math.hypot(cin[0] - cout[0], cin[1] - cout[1], cin[2] - cout[2]) / 45);
 }
 
 function scoreQuad(lines, covs, A, B, w, h, margin, o) {
@@ -462,110 +576,216 @@ function scoreQuad(lines, covs, A, B, w, h, margin, o) {
   if (minS < 0.2) return null;
   const support = sides.reduce((s, v) => s + v, 0) / 4;
   if (support < 0.45) return null;
+  const over = overshoot(covs, sideLine, corners);
   // Cards are nearly always photographed upright; a sideways card-shaped box is
   // more often a text box or the artwork.
   const score =
-    support * (1 - (0.6 * aspectError) / o.maxAspectError) * (0.9 + 0.1 * Math.sqrt(area)) * (0.85 + 0.15 * minS) * (landscape ? 0.75 : 1);
-  return { corners, score, support, sides, aspectError, area, landscape, lines: sideLine.map((i) => lines[i]) };
+    support *
+    // Perspective skews the measured aspect a little, so small errors are free.
+    (1 - (0.6 * Math.max(0, aspectError - 0.04)) / (o.maxAspectError - 0.04)) *
+    (0.9 + 0.1 * Math.sqrt(area)) *
+    (0.85 + 0.15 * minS) *
+    (1 - 0.6 * over) *
+    (landscape ? 0.75 : 1);
+  return { corners, score, support, sides, over, aspectError, area, landscape, ids: sideLine, lines: sideLine.map((i) => lines[i]) };
 }
 
 /**
- * Cards are often photographed in a toploader or sleeve, whose edges also form a
- * card-shaped rectangle, and the card's own inner frame forms a slightly smaller one.
- * Take the largest well-shaped outline that isn't a holder:
- *  - a holder has another card-shaped outline inside at ≤ 76% of its area (a card in a
- *    toploader is ~70%; a card's inner frame is 78–88% of the card), or
- *  - background texture (carpet, wood) shows between it and a snug outline inside.
+ * Cards are often photographed in a toploader, whose edges also form a card-shaped
+ * rectangle. Start from the best-scoring outline; if it surrounds a strong, complete
+ * card outline at 45–80% of its area and the band between them looks like what's
+ * outside (background seen through plastic), it's a holder: take the card inside.
+ * (The opposite mistake, the card's inner frame instead of its edge, is fixed side
+ * by side in pushOut.)
  */
-function preferCard(quads, img, em) {
-  const best = quads[0];
-  const pool = quads.filter((q) => !q.landscape && q.aspectError < 0.1 && q.score >= best.score * 0.5);
-  if (!pool.length) return best;
-  const eligible = new Set(pool.filter((q) => q.score >= best.score * 0.75));
-  const byArea = [...pool].sort((a, b) => b.area - a.area);
-  for (const outer of byArea) {
-    if (!eligible.has(outer)) continue;
-    const size = quadSize(outer.corners);
-    const inside = byArea
-      .filter((q) => q !== outer && q.area / outer.area > 0.4 && q.area / outer.area < 0.97)
-      .filter((q) => q.corners.every((p) => insideQuad(outer.corners, p, 2)))
-      .sort((a, b) => b.score - a.score);
-    const held = inside.filter((q) => q.area / outer.area <= 0.76 && q.corners.every((p) => insideQuad(outer.corners, p, -0.01 * size.h)));
-    if (held.length) {
-      held.forEach((q) => eligible.add(q));
-      continue;
-    }
-    const snug = inside.find((q) => bandShowsBackground(img, em, outer.corners, q.corners));
-    if (snug) {
-      eligible.add(snug);
-      continue;
-    }
-    return outer;
+function preferCard(quads, img, em, trace) {
+  const name = (q) => `${q.corners.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join(' ')} (score ${q.score.toFixed(2)})`;
+  const portrait = quads.filter((q) => !q.landscape);
+  let best = portrait[0] && portrait[0].score >= quads[0].score * 0.8 ? portrait[0] : quads[0];
+  const pool = portrait.filter((q) => q.aspectError < 0.1 && q.score >= best.score * 0.5);
+  const within = (outer, inner, lo, hi, margin) =>
+    inner !== outer &&
+    inner.area / outer.area > lo &&
+    inner.area / outer.area < hi &&
+    inner.corners.every((p) => insideQuad(outer.corners, p, margin));
+  for (let step = 0; step < 2; step++) {
+    const margin = -0.01 * quadSize(best.corners).h;
+    const card = pool
+      .filter((q) => q.score >= best.score * 0.7 && Math.min(...q.sides) >= 0.5 && within(best, q, 0.45, 0.8, margin))
+      .sort((a, b) => b.score - a.score)
+      .find((q) => {
+        const r = compareBand(img, em, best.corners, q.corners, trace && ((m) => trace.push(`${name(best)} around ${name(q)}: ${m}`)));
+        return r.valid >= 3 && r.like >= 3;
+      });
+    if (!card) break;
+    trace?.push(`${name(best)}: holder; card inside is ${name(card)}`);
+    best = card;
   }
+  trace?.push(`chosen ${name(best)}`);
   return best;
 }
 
+/** Median by quickselect (reorders `a`). */
+function median(a) {
+  const k = a.length >> 1;
+  let lo = 0;
+  let hi = a.length - 1;
+  while (lo < hi) {
+    const pivot = a[(lo + hi) >> 1];
+    let i = lo;
+    let j = hi;
+    while (i <= j) {
+      while (a[i] < pivot) i++;
+      while (a[j] > pivot) j--;
+      if (i <= j) {
+        [a[i], a[j]] = [a[j], a[i]];
+        i++;
+        j--;
+      }
+    }
+    if (k <= j) hi = j;
+    else if (k >= i) lo = i;
+    else break;
+  }
+  return a.length ? a[k] : 0;
+}
+
 /**
- * Does the background (textured and coloured like what's just outside `outer`) show
- * in the band between `outer` and `inner`, on every side where there is a band?
- * True for a sleeve or a loose outline around the card; false for a card border.
+ * Compare the band between `outer` and `inner` with what lies just outside `outer`,
+ * side by side. Returns { valid: sides with a band wide enough to judge, like: sides
+ * where the band looks like the outside }.
  */
-export function bandShowsBackground(img, em, outer, inner) {
+export function compareBand(img, em, outer, inner, log) {
+  let valid = 0;
+  let like = 0;
+  for (let k = 0; k < 4; k++) {
+    const r = sideBand(img, em, outer[k], outer[(k + 1) % 4], inner[k], inner[(k + 1) % 4]);
+    if (r.like == null) continue;
+    valid++;
+    if (r.like) like++;
+    log?.(`side ${k} ${r.msg}`);
+  }
+  return { valid, like };
+}
+
+/**
+ * One side of a band: does the strip between segment i0-i1 (inner) and o0-o1 (outer)
+ * look like what lies beyond o0-o1? Median colour and texture, so a sticker over part
+ * of the side doesn't matter. like: true / false / null (band too thin to judge).
+ */
+function sideBand(img, em, o0, o1, i0, i1) {
   const { width: w, height: h, data } = img;
-  const minW = Math.max(2, 0.012 * (quadSize(outer).w + quadSize(outer).h));
   const stats = (pts) => {
-    let r = 0;
-    let g = 0;
-    let b = 0;
-    let t = 0;
-    let n = 0;
+    const r = [];
+    const g = [];
+    const b = [];
+    const t = [];
     for (const p of pts) {
       const x = Math.round(p.x);
       const y = Math.round(p.y);
       if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) continue;
       const i = y * w + x;
-      r += data[i * 4];
-      g += data[i * 4 + 1];
-      b += data[i * 4 + 2];
-      t += em.mag[i];
-      n++;
+      r.push(data[i * 4]);
+      g.push(data[i * 4 + 1]);
+      b.push(data[i * 4 + 2]);
+      t.push(em.mag[i]);
     }
-    return n >= 6 ? { c: [r / n, g / n, b / n], tex: t / n } : null;
+    return r.length >= 6 ? { c: [median(r), median(g), median(b)], tex: median(t) } : null;
   };
-  let sides = 0;
-  for (let k = 0; k < 4; k++) {
-    const o0 = outer[k];
-    const o1 = outer[(k + 1) % 4];
-    const i0 = inner[k];
-    const i1 = inner[(k + 1) % 4];
-    const band = [];
-    const out = [];
-    let wsum = 0;
-    const N = 40;
-    for (let s = 0; s <= N; s++) {
-      const f = 0.12 + (0.76 * s) / N; // skip the corners
-      const op = { x: o0.x + (o1.x - o0.x) * f, y: o0.y + (o1.y - o0.y) * f };
-      const ip = { x: i0.x + (i1.x - i0.x) * f, y: i0.y + (i1.y - i0.y) * f };
-      const dx = op.x - ip.x;
-      const dy = op.y - ip.y;
-      const bw = Math.hypot(dx, dy);
-      wsum += bw;
-      if (bw < 2) continue;
-      for (const t of [0.35, 0.5, 0.65]) band.push({ x: ip.x + dx * t, y: ip.y + dy * t });
-      const step = Math.max(3, Math.min(bw * 0.5, 10)) / bw;
-      for (const t of [1, 1.5, 2]) out.push({ x: op.x + dx * step * t, y: op.y + dy * step * t });
-    }
-    if (wsum / (N + 1) < minW) continue;
-    const bs = stats(band);
-    const os = stats(out);
-    if (!bs || !os) continue;
-    const dc = Math.hypot(bs.c[0] - os.c[0], bs.c[1] - os.c[1], bs.c[2] - os.c[2]);
-    // Through clear plastic the background looks a little lighter and softer.
-    const like = bs.tex > 4 && os.tex > 4 && bs.tex > os.tex * 0.3 && dc < 90;
-    if (!like) return false;
-    sides++;
+  const band = [];
+  const out = [];
+  let wsum = 0;
+  let wide = 0;
+  const N = 40;
+  // Walk along the inner side; at each point go straight out (along its normal) to
+  // the outer side's line: that's the band; a little further is the outside.
+  const len = dist(i0, i1) || 1;
+  const ux = (i1.x - i0.x) / len;
+  const uy = (i1.y - i0.y) / len;
+  const olen = dist(o0, o1) || 1;
+  const mx = -(o1.y - o0.y) / olen;
+  const my = (o1.x - o0.x) / olen;
+  const mn = mx * -uy + my * ux; // outer normal · inner normal
+  for (let s = 0; s <= N && Math.abs(mn) > 0.5; s++) {
+    const f = 0.12 + (0.76 * s) / N; // skip the corners
+    const ip = { x: i0.x + (i1.x - i0.x) * f, y: i0.y + (i1.y - i0.y) * f };
+    const t = (mx * (o0.x - ip.x) + my * (o0.y - ip.y)) / mn; // signed distance to the outer line
+    const bw = Math.abs(t);
+    const dx = (-uy * t) / (bw || 1);
+    const dy = (ux * t) / (bw || 1);
+    wsum += bw;
+    // Stay 3 px clear of both lines: the edges' own blur isn't texture.
+    if (bw < 8) continue;
+    wide++;
+    for (let k = 3; k <= bw - 3; k += 2) band.push({ x: ip.x + dx * k, y: ip.y + dy * k });
+    for (let k = 3; k <= Math.max(7, Math.min(bw, 14)); k += 2) out.push({ x: ip.x + dx * (bw + k), y: ip.y + dy * (bw + k) });
   }
-  return sides >= 2;
+  const bs = stats(band);
+  const os = stats(out);
+  if (!bs || !os || wide < N / 2) return { like: null, card: null, msg: `band ${Math.round(wsum / (N + 1))}px: too thin to judge` };
+  const dc = Math.hypot(bs.c[0] - os.c[0], bs.c[1] - os.c[1], bs.c[2] - os.c[2]);
+  // Through clear plastic the background looks a little lighter and softer.
+  const texLike = (Math.min(bs.tex, os.tex) + 2) / (Math.max(bs.tex, os.tex) + 2) > 0.35;
+  const like = texLike && looksHazed(bs.c, os.c);
+  const verdict = like ? 'background through plastic' : 'part of the card';
+  return { like, card: !like, msg: `band ${Math.round(wsum / (N + 1))}px texture ${bs.tex.toFixed(1)}/${os.tex.toFixed(1)} colour diff ${Math.round(dc)} -> ${verdict}` };
+}
+
+/**
+ * Move each side out to a parallel line just beyond it when the strip in between is
+ * part of the card: the inner frame, the name bar or the artwork's top often make a
+ * stronger line than the card's own edge (more so with a sticker or glare on it).
+ * A side may move up to 8% of the card, the top 13% (the name area is tall).
+ */
+function pushOut(quad, lines, covs, img, em, trace) {
+  const ids = [...quad.ids];
+  const L = (k) => lines[ids[(k + 4) % 4]];
+  const corner = (k) => intersect(L(k - 1), L(k));
+  const c = { x: 0, y: 0 };
+  quad.corners.forEach((p) => {
+    c.x += p.x / 4;
+    c.y += p.y / 4;
+  });
+  const size = quadSize(quad.corners);
+  for (let k = 0; k < 4; k++) {
+    const budget = k % 2 ? 0.08 * size.w : (k ? 0.08 : 0.13) * size.h;
+    let moved = 0;
+    for (let step = 0; step < 4; step++) {
+      const cur = L(k);
+      const a = corner(k);
+      const b = corner(k + 1);
+      if (!a || !b) break;
+      const curSupport = segmentSupport(covs[ids[k]], a, b);
+      let next = null;
+      for (let j = 0; j < lines.length; j++) {
+        const l = lines[j];
+        if (j === ids[k] || angDiff(l.t, cur.t) > 4) continue;
+        // Both ends of the side must lie between the centre and line j.
+        const inSign = Math.sign(c.x * l.nx + c.y * l.ny - l.rho);
+        const da = (a.x * l.nx + a.y * l.ny - l.rho) * inSign;
+        const db = (b.x * l.nx + b.y * l.ny - l.rho) * inSign;
+        const d = (da + db) / 2;
+        if (Math.min(da, db) < 1 || moved + d > budget) continue;
+        if (next && d >= next.d) continue;
+        const a2 = intersect(L(k - 1), l);
+        const b2 = intersect(l, L(k + 1));
+        if (!a2 || !b2) continue;
+        const sup = segmentSupport(covs[j], a2, b2);
+        if (sup < 0.5 || sup < curSupport * 0.6) continue;
+        next = { j, d, a2, b2 };
+      }
+      if (!next) break;
+      const band = sideBand(img, em, next.a2, next.b2, a, b);
+      trace?.push(`side ${k}: line ${next.d.toFixed(1)}px further out, ${band.msg}`);
+      if (band.card === false) break; // background between: that's a holder's edge
+      ids[k] = next.j;
+      moved += next.d;
+    }
+  }
+  if (ids.every((id, k) => id === quad.ids[k])) return quad;
+  const corners = [0, 1, 2, 3].map((k) => corner(k));
+  if (corners.some((p) => !p)) return quad;
+  return { ...quad, corners, ids, lines: ids.map((i) => lines[i]) };
 }
 
 /** Re-fit each side by least squares on the edge pixels along it (sub-pixel corners). */
@@ -634,6 +854,17 @@ function refineQuad(em, quad) {
   return { ...quad, corners: pts, lines };
 }
 
+/** Quads that differ from every better one by more than 5% of the card's width at some corner. */
+function distinctOutlines(quads) {
+  const kept = [];
+  for (const q of quads) {
+    const w = quadSize(q.corners).w;
+    if (kept.every((k) => Math.max(...k.corners.map((p, i) => dist(p, q.corners[i]))) > 0.05 * w)) kept.push(q);
+    if (kept.length >= 4) break;
+  }
+  return kept;
+}
+
 // ---------------- canvas helpers (browser only) ----------------
 
 function makeCanvas(w, h) {
@@ -664,12 +895,13 @@ export function detectCard(canvas, opts = {}) {
   const best = quads[0];
   if (!best || best.score < (o.minScore ?? 0.45)) return null;
   const up = (c) => c.map((p) => ({ x: p.x / s, y: p.y / s }));
+  if (o.trace) o.trace.push(...quads.slice(0, 12).map((q) => `cand ${q.corners.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join(' ')} score ${q.score.toFixed(3)} sides ${q.sides.map((v) => v.toFixed(2))} over ${q.over.toFixed(2)} contrast ${q.contrast?.toFixed(2)} ae ${q.aspectError.toFixed(3)} area ${q.area.toFixed(3)}${q.landscape ? ' landscape' : ''}`));
   return {
     corners: up(best.corners),
     score: best.score,
     area: best.area,
     landscape: best.landscape,
-    candidates: quads.slice(1, 4).map((q) => up(q.corners)),
+    candidates: distinctOutlines(quads).slice(1, 4).map((q) => up(q.corners)),
     ms,
   };
 }
@@ -677,9 +909,10 @@ export function detectCard(canvas, opts = {}) {
 /**
  * Cut the card out of `canvas` and straighten it. corners: [TL, TR, BR, BL].
  * The output is card-shaped, `width` px wide (default: the card's size in the
- * photo, kept between 600 and 1000 px). A landscape quad comes out turned upright.
+ * photo, kept between 600 and 1000 px), with an optional `margin` (fraction of the
+ * card) of surroundings kept on every side. A landscape quad comes out turned upright.
  */
-export function warpCard(canvas, corners, { width } = {}) {
+export function warpCard(canvas, corners, { width, margin = 0 } = {}) {
   let c = corners;
   const size = quadSize(c);
   if (size.w > size.h) {
@@ -690,11 +923,12 @@ export function warpCard(canvas, corners, { width } = {}) {
   const outW = Math.round(width || Math.max(600, Math.min(1000, srcW)));
   const outH = Math.round(outW / CARD_ASPECT);
   // Pre-shrink the card's bounding box on the GPU so the JS warp samples ~1:1.
-  const k = Math.min(1, (outW / srcW) * 1.15);
-  const x0 = Math.max(0, Math.floor(Math.min(...c.map((p) => p.x))) - 2);
-  const y0 = Math.max(0, Math.floor(Math.min(...c.map((p) => p.y))) - 2);
-  const x1 = Math.min(canvas.width, Math.ceil(Math.max(...c.map((p) => p.x))) + 2);
-  const y1 = Math.min(canvas.height, Math.ceil(Math.max(...c.map((p) => p.y))) + 2);
+  const k = Math.min(1, outW / srcW);
+  const pad = 2 + margin * Math.max(size.w, size.h) * 1.3;
+  const x0 = Math.max(0, Math.floor(Math.min(...c.map((p) => p.x)) - pad));
+  const y0 = Math.max(0, Math.floor(Math.min(...c.map((p) => p.y)) - pad));
+  const x1 = Math.min(canvas.width, Math.ceil(Math.max(...c.map((p) => p.x)) + pad));
+  const y1 = Math.min(canvas.height, Math.ceil(Math.max(...c.map((p) => p.y)) + pad));
   const bw = Math.max(1, Math.round((x1 - x0) * k));
   const bh = Math.max(1, Math.round((y1 - y0) * k));
   const mid = makeCanvas(bw, bh);
@@ -706,11 +940,15 @@ export function warpCard(canvas, corners, { width } = {}) {
   const sx = bw / (x1 - x0);
   const sy = bh / (y1 - y0);
   const to = c.map((p) => ({ x: (p.x - x0) * sx, y: (p.y - y0) * sy }));
+  // With a margin, the corners land that far inside the output (in case an edge
+  // was found on the card's inner frame rather than its outer edge).
+  const mx = (outW * margin) / (1 + 2 * margin);
+  const my = (outH * margin) / (1 + 2 * margin);
   const from = [
-    { x: 0, y: 0 },
-    { x: outW, y: 0 },
-    { x: outW, y: outH },
-    { x: 0, y: outH },
+    { x: mx, y: my },
+    { x: outW - mx, y: my },
+    { x: outW - mx, y: outH - my },
+    { x: mx, y: outH - my },
   ];
   const h = homography(from, to);
   const out = makeCanvas(outW, outH);

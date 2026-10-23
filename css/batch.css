@@ -18,7 +18,9 @@
 .b-run-title { font-weight: 700; }
 .b-bar { height: 6px; margin-top: 8px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 .b-bar span { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
-.b-run-note { margin: 6px 0 0; font-size: .75rem; }
+.b-run-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; }
+.b-run-foot .muted { font-size: .75rem; line-height: 1.3; }
+.b-run-foot .btn { flex: none; }
 .b-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .b-actions .btn { padding: 10px 8px; font-size: .9rem; }
 

@@ -201,6 +201,11 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 }
 .chip.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
 .chip .chip-price { opacity: .75; margin-left: 4px; font-weight: 400; }
+.variant-reason { margin: 8px 0 0; color: var(--muted); }
+.variant-reason.found {
+  color: var(--text); padding: 8px 10px; border-radius: 10px;
+  background: color-mix(in srgb, var(--good) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--good) 45%, var(--border));
+}
 
 .price-tables { display: grid; gap: 10px; margin-top: 12px; }
 .ptable { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }

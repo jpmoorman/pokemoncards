@@ -13,7 +13,7 @@ export const PHOTO_DEFAULTS = {
   background: 'carpet', // 'carpet' | 'wood' | 'table'
   fill: 0.6, // card width / photo width
   rotate: 0, // degrees, clockwise
-  tilt: 0, // keystone: top edge this much narrower than the bottom (0–0.15)
+  tilt: 0, // degrees the card is tipped back (top farther from the camera), 0–20
   offset: { x: 0, y: 0 }, // card centre shift, fraction of photo size
   toploader: false,
   sticker: false, // white "$25" price sticker over the top-right corner
@@ -22,19 +22,20 @@ export const PHOTO_DEFAULTS = {
   quality: 0.82,
   seed: 1,
   noCard: false,
+  cardImage: null, // PNG bytes of a ready-made card to use instead of drawing cardSpec (e.g. with a stamp)
 };
 
 /** Named photo set-ups used by the tests. */
 export const PHOTOS = {
   flat: { rotate: 0, background: 'table' },
-  turned: { rotate: 9, tilt: 0.06, background: 'wood' },
-  toploader: { rotate: -4, tilt: 0.05, toploader: true, sticker: true, glare: { at: 0.55, angle: 35, strength: 0.45, width: 0.12 } },
-  steep: { rotate: 14, tilt: 0.1, fill: 0.55, offset: { x: 0.04, y: -0.03 }, background: 'carpet', glare: { at: 0.3, angle: -20, strength: 0.35, width: 0.1 } },
+  turned: { rotate: 9, tilt: 8, background: 'wood' },
+  toploader: { rotate: -4, tilt: 6, toploader: true, sticker: true, glare: { at: 0.55, angle: 35, strength: 0.45, width: 0.12 } },
+  steep: { rotate: 14, tilt: 15, fill: 0.55, offset: { x: 0.04, y: -0.03 }, background: 'carpet', glare: { at: 0.3, angle: -20, strength: 0.35, width: 0.1 } },
 };
 
 export async function makePhoto(page, cardSpec, photoSpec = {}) {
   const o = { ...PHOTO_DEFAULTS, ...photoSpec };
-  const cardPng = o.noCard ? null : (await makeCard(page, { ...cardSpec, scale: 2 })).toString('base64');
+  const cardPng = o.noCard ? null : (o.cardImage || (await makeCard(page, { ...cardSpec, scale: 2 }))).toString('base64');
   const res = await page.evaluate(renderPhoto, { o, cardPng });
   return { buffer: Buffer.from(res.dataUrl.split(',')[1], 'base64'), corners: res.corners, width: o.width, height: o.height };
 }
@@ -78,16 +79,20 @@ async function renderPhoto({ o, cardPng }) {
     }
   }
 
-  // ---- the card's corners in the photo ----
+  // ---- the card's corners in the photo: pinhole camera (focal length = photo width),
+  // card tipped back by `tilt`, then turned by `rotate` ----
   const cw = W * o.fill;
   const ch = (cw * 88) / 63;
   const cx = W * (0.5 + o.offset.x);
   const cy = H * (0.5 + o.offset.y);
   const a = (o.rotate * Math.PI) / 180;
+  const t = (o.tilt * Math.PI) / 180;
+  const focal = W; // card at distance `focal`: untilted, it is `cw` px wide
   const place = (x, y) => {
-    // Keystone first (top edge narrower by `tilt`), then rotate about the centre.
-    const px = x * (1 - o.tilt * (0.5 - y / ch));
-    return { x: cx + px * Math.cos(a) - y * Math.sin(a), y: cy + px * Math.sin(a) + y * Math.cos(a) };
+    const z = focal - y * Math.sin(t); // top (y < 0) farther away
+    const px = (focal * x) / z;
+    const py = (focal * y * Math.cos(t)) / z;
+    return { x: cx + px * Math.cos(a) - py * Math.sin(a), y: cy + px * Math.sin(a) + py * Math.cos(a) };
   };
   const corners = [place(-cw / 2, -ch / 2), place(cw / 2, -ch / 2), place(cw / 2, ch / 2), place(-cw / 2, ch / 2)];
 
@@ -229,6 +234,8 @@ async function renderPhoto({ o, cardPng }) {
   fin.width = W;
   fin.height = H;
   const f = fin.getContext('2d');
+  // Sharp copy underneath so the blur doesn't fade the picture's edges.
+  f.drawImage(photo, 0, 0);
   f.filter = o.blur ? `blur(${o.blur}px)` : 'none';
   f.drawImage(photo, 0, 0);
   f.filter = 'none';

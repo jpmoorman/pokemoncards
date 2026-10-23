@@ -1,0 +1,68 @@
+/* ---------- trade evaluator (js/trade.js) ---------- */
+#view-trade, .trade-picker { --give: #b99aff; --get: #4cc9f0; }
+#view-trade { gap: 12px; }
+#view-trade .fine { margin: 4px 0 0; }
+
+/* Summary: stays under the top bar while the lists scroll. */
+.trade-summary {
+  position: sticky; top: var(--trade-top, 0px); z-index: 3;
+  margin: -12px -16px 0; padding: 10px 16px 8px; background: var(--bg);
+}
+.ts-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+.ts-totals { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; gap: 8px; }
+.ts-side { display: flex; flex-direction: column; min-width: 0; }
+.ts-side.get { text-align: right; align-items: flex-end; }
+.ts-label { font-size: .75rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+.ts-side.give .ts-label { color: var(--give); }
+.ts-side.get .ts-label { color: var(--get); }
+.ts-amount { font-size: 1.45rem; font-weight: 800; line-height: 1.15; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ts-count { color: var(--muted); font-size: .78rem; }
+.ts-vs { color: var(--muted); font-size: .8rem; padding-bottom: 1.35em; }
+
+.ts-bar { position: relative; display: flex; height: 10px; margin: 10px 0 8px; border-radius: 99px; overflow: hidden; background: var(--surface-2); }
+.ts-bar .ts-give { background: var(--give); transition: width .25s ease; }
+.ts-bar .ts-get { background: var(--get); flex: 1; }
+.ts-bar.empty .ts-give, .ts-bar.empty .ts-get { background: none; }
+.ts-bar .ts-mid { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--bg); }
+
+.ts-verdict { margin: 0; font-size: 1.05rem; font-weight: 800; line-height: 1.25; }
+.ts-verdict.fair, .ts-verdict.ahead { color: var(--good); }
+.ts-verdict.behind { color: var(--bad); }
+.ts-verdict.empty, .ts-verdict.unknown { color: var(--muted); font-weight: 600; font-size: .95rem; }
+.ts-diff { margin: 2px 0 0; color: var(--muted); font-size: .82rem; }
+.ts-warn { margin: 6px 0 0; color: var(--warn); font-size: .82rem; font-weight: 600; }
+
+/* The two sides: stacked on phones, side by side on wide screens. */
+.trade-sides { display: grid; gap: 10px; }
+@media (min-width: 720px) {
+  .trade-sides { grid-template-columns: 1fr auto 1fr; align-items: start; }
+  .trade-swap { margin-top: 40px; }
+}
+.trade-side { border-top: 3px solid var(--give); padding-top: 8px; }
+.trade-side.get { border-top-color: var(--get); }
+.tside-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.tside-head h2 { margin: 0; font-size: 1.05rem; color: var(--give); }
+.trade-side.get .tside-head h2 { color: var(--get); }
+.tside-total { font-weight: 800; font-variant-numeric: tabular-nums; }
+.tside-empty { margin: 4px 0 0; padding: 14px 12px; border: 1px dashed var(--border); border-radius: 12px; text-align: center; }
+.trade-add { display: flex; gap: 8px; margin-top: 8px; }
+.trade-add .btn { flex: 1 1 auto; padding-left: 8px; padding-right: 8px; }
+.trade-swap { justify-self: center; border-radius: 99px; }
+.tline-noprice { color: var(--warn); font-size: .72rem; font-weight: 700; }
+
+.trade-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+.trade-tools .btn { flex: 1 1 auto; }
+
+/* "From collection" picker */
+.tp-panel { display: flex; flex-direction: column; gap: 10px; overflow: hidden; max-height: 85vh; padding: 14px; }
+.tp-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.tp-head h3 { margin: 0; font-size: 1.05rem; }
+.tp-panel.give .tp-side { color: var(--give); }
+.tp-panel.get .tp-side { color: var(--get); }
+.tp-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; flex: 1; }
+.tp-list .citem { background: var(--bg); }
+.tp-list .c-right { min-width: 76px; }
+
+.trade-undo { display: flex; align-items: center; gap: 14px; white-space: nowrap; }
+.trade-undo button { background: none; border: 0; padding: 4px 2px; color: var(--accent); font: inherit; font-weight: 800; cursor: pointer; }
+.trade-text { width: 100%; font: inherit; font-size: .85rem; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }

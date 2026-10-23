@@ -68,7 +68,7 @@ await shot(page, 'queued');
 
 // ---- process all (and switch tabs mid-way) ----
 await page.click('#batch-process');
-await page.waitForSelector('#batch-progress');
+await page.waitForFunction(() => /^Processing/.test(document.querySelector('#batch-progress')?.textContent));
 const prog = await page.textContent('#batch-progress');
 t.check('progress shows "Processing n of 3…"', /^Processing [1-3] of 3…$/.test(prog), prog);
 await shot(page, 'processing');

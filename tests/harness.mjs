@@ -79,7 +79,7 @@ export async function startHarness({ launchArgs = [], contextOptions = {} } = {}
     await page.goto(origin + '/index.html');
     return page;
   }
-  const errors = () => logs.filter((l) => l.startsWith('pageerror') || (l.startsWith('error') && !/Estimating resolution/.test(l)));
+  const errors = () => logs.filter((l) => l.startsWith('pageerror') || (l.startsWith('error') && !/Estimating resolution|Detected \d+ diacritics/.test(l)));
   return { origin, browser, context, newPage, logs, errors, close: async () => { await browser.close(); server.close(); } };
 }
 

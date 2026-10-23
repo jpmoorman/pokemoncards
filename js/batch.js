@@ -290,7 +290,17 @@ async function processAll(only) {
   const tried = new Set();
   const untried = () => (only ? [only] : items).filter((i) => items.includes(i) && isPending(i) && !tried.has(i.id));
   if (!untried().length) return;
-  Object.assign(run, { active: true, stop: false, index: 0, total: untried().length, msg: '' });
+  Object.assign(run, { active: true, stop: false, index: 0, total: untried().length, msg: 'Loading the card list…' });
+  render();
+  try {
+    await catalogReady();
+  } catch {
+    // Without the card list every photo would be read and then fail; stop early instead.
+    Object.assign(run, { active: false, msg: '' });
+    render();
+    toast("Couldn't load the card list. Check your connection and try again.", 3500);
+    return;
+  }
   keepAwake(true);
   const before = new Set(items.filter(needsCheck).map((i) => i.id));
   let found = 0;
@@ -363,7 +373,8 @@ async function processItem(it) {
     Object.assign(it, { status: 'matched', entry: makeEntry(card, row), versions: rows.length, check: it.conf !== 'high' });
   } catch (e) {
     console.warn(e);
-    Object.assign(it, { status: 'error', error: e.message || String(e) });
+    const msg = e.message || String(e);
+    Object.assign(it, { status: 'error', error: /fetch|network|HTTP \d/i.test(msg) ? 'No connection. Check your internet.' : msg });
   }
 }
 
@@ -598,7 +609,7 @@ function counts() {
 
 // One input, moved into whichever "Add photos" button is on screen (a <label>, which iOS handles best).
 let fileInput = null;
-function addPhotosButton(label) {
+function addPhotosButton(label, cls = 'btn') {
   if (!fileInput) {
     fileInput = el('input', {
       type: 'file',
@@ -615,7 +626,7 @@ function addPhotosButton(label) {
       },
     });
   }
-  return el('label', { class: 'btn', id: 'batch-add-photos' }, label, fileInput);
+  return el('label', { class: cls, id: 'batch-add-photos' }, label, fileInput);
 }
 
 function startBatchScanning() {
@@ -677,13 +688,22 @@ function runBox(c) {
         el(
           'div',
           { class: 'b-run-text' },
-          el('div', { class: 'b-run-title', id: 'batch-progress' }, run.stop ? 'Stopping after this photo…' : `Processing ${run.index} of ${run.total}…`),
+          el(
+            'div',
+            { class: 'b-run-title', id: 'batch-progress' },
+            run.stop ? 'Stopping after this photo…' : run.index ? `Processing ${run.index} of ${run.total}…` : 'Getting ready…',
+          ),
           el('div', { class: 'muted small', id: 'batch-progress-msg' }, run.msg),
         ),
         el('button', { class: 'btn small', id: 'batch-stop', type: 'button', disabled: run.stop, onclick: stop }, 'Stop'),
       ),
       el('div', { class: 'b-bar' }, el('span', { style: `width:${pct}%` })),
-      el('p', { class: 'muted small b-run-note' }, 'You can switch tabs or review finished cards while this runs.'),
+      el(
+        'div',
+        { class: 'b-run-foot' },
+        el('span', { class: 'muted small' }, 'You can switch tabs or review finished cards while this runs.'),
+        addPhotosButton('+ Photos', 'btn small'),
+      ),
     );
   }
   return el(

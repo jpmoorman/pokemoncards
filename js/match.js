@@ -314,9 +314,20 @@ export function findNamesInText(index, text, { limit = 5, minScore = 0.75 } = {}
   const fill = count.slice();
   for (let i = 0; i < n; i++) pos[fill[codes[i]]++] = i;
   const words = ` ${normalize(text)} `;
-  const evolves = (at) => {
-    const before = t.slice(Math.max(0, at - 12), at);
-    return before.includes('from') || dice('evolvesfrom', before.slice(-11)) >= 0.6;
+  // Where words start and end in the compact text: a fuzzy match must line up with
+  // them (±1 letter), so "from attacks" can't pass for "Exroma".
+  const starts = new Uint8Array(t.length + 2);
+  const ends = new Uint8Array(t.length + 2);
+  let wordAt = 0;
+  for (const word of words.trim().split(' ')) {
+    starts[wordAt] = 1;
+    wordAt += word.length;
+    ends[wordAt] = 1;
+  }
+  const near = (marks, i) => marks[i] || (i > 0 && marks[i - 1]) || marks[i + 1];
+  const evolves = (i) => {
+    const before = t.slice(Math.max(0, i - 12), i);
+    return /fr[o0]m.?$/.test(before) || dice('evolvesfrom', before.slice(-11)) >= 0.6;
   };
 
   const found = [];
@@ -357,7 +368,9 @@ export function findNamesInText(index, text, { limit = 5, minScore = 0.75 } = {}
             const e = editDistance(key, win, edits);
             if (e <= edits) d = Math.max(d, 1 - e / L);
           }
-          if (d >= minScore && (!best || d > best.score) && !evolves(s)) best = { name: entry.name, score: d, pos: s / t.length, len: L };
+          if (d < minScore || (best && d <= best.score) || evolves(s)) continue;
+          if (d < 1 && !(near(starts, s) && near(ends, s + w))) continue;
+          best = { name: entry.name, score: d, pos: s / t.length, len: L };
         }
       }
     }
