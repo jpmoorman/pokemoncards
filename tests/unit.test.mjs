@@ -335,7 +335,9 @@ test('trade value %: one side counts at a percentage of market', async () => {
   const theirs = evaluateTrade({ give, get, rate: 80, rateSide: 'get' });
   assert.equal(theirs.get.usd, 13.45);
   assert.equal(theirs.give.usd, 21.8);
-  assert.equal(clampRate(83), 85);
-  assert.equal(clampRate(10), 50);
+  assert.equal(clampRate(92), 92); // 1% steps
+  assert.equal(clampRate(50), 80); // never below 80%
+  assert.equal(clampRate(120), 100);
   assert.equal(clampRate(undefined), 100);
+  assert.equal(evaluateTrade({ give, get, rate: 92, rateSide: 'give' }).give.usd, 20.06);
 });

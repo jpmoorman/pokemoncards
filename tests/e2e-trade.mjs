@@ -417,6 +417,8 @@ await shot('fair');
       },
       [v, release],
     );
+  const range = await page.$eval('#trade-rate', (r) => [r.min, r.max, r.step].join(','));
+  t.check('trade value slider goes from 100% down to 80% in 1% steps', range === '80,100,1', range);
   const sliderBefore = await page.evaluate(() => document.querySelector('#trade-rate'));
   await slide(80, false); // mid-drag: numbers update, the slider element stays the same
   const sameSlider = await page.evaluate((el) => el === document.querySelector('#trade-rate'), sliderBefore);

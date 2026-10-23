@@ -5,7 +5,7 @@
 // The current trade is kept on the device in localStorage ('trade.v1'). Lines are saved
 // entries (see entry.js) plus pricedAt: when the card data their price comes from was
 // downloaded (ms). Collection and Batch entries don't have it; their price may be months old.
-// The trade also keeps a trade-value percentage (rate, 50–100) and the side it applies to
+// The trade also keeps a trade-value percentage (rate, 80–100) and the side it applies to
 // (rateSide): a shop crediting your cards at 80% of market is rate 80 on 'give'.
 import { $, el, on, emit, toast, confirmDialog, navigate } from './ui.js';
 import { getCard, cardFetchedAt } from './api.js';
@@ -68,9 +68,11 @@ export function evaluateTrade({ give = [], get = [], rate = 100, rateSide = 'giv
   return { give: g, get: r, diff, pct: diffPct, unpriced: g.unpriced + r.unpriced, verdict };
 }
 
-/** Trade value % in 5% steps between 50 and 100. (A function declaration: load() uses it at start-up.) */
+export const MIN_RATE = 80;
+
+/** Trade value %: a whole number from 80 to 100. (A function declaration: load() uses it at start-up.) */
 export function clampRate(r) {
-  return Math.min(100, Math.max(50, Math.round((Number(r) || 100) / 5) * 5));
+  return Math.min(100, Math.max(MIN_RATE, Math.round(Number(r) || 100)));
 }
 
 function unpricedSide(side, n) {
@@ -432,11 +434,11 @@ function sideTotal(s) {
   return s.rate < 100 ? `${formatMoney(s.market)} → ${formatMoney(s.usd)} at ${s.rate}%` : formatMoney(s.usd);
 }
 
-/** Trade-value slider: count one side at 50–100% of market (e.g. a shop's 80% trade-in credit). */
+/** Trade-value slider: count one side at 80–100% of market (e.g. a shop's 80% trade-in credit). */
 function rateControl() {
   const label = el('b', { class: 'tr-value' }, `${trade.rate}%`);
   const slider = el('input', {
-    type: 'range', min: 50, max: 100, step: 5, value: trade.rate, id: 'trade-rate', class: 'tr-slider',
+    type: 'range', min: MIN_RATE, max: 100, step: 1, value: trade.rate, id: 'trade-rate', class: 'tr-slider',
     'aria-label': 'Trade value percentage', 'aria-valuetext': `${trade.rate}%`,
   });
   // While dragging only the numbers update, so the slider isn't redrawn under the finger.
@@ -465,9 +467,9 @@ function rateControl() {
     { class: 'trade-rate' },
     el('div', { class: 'tr-head' }, el('span', {}, 'Trade value'), label, trade.rate < 100 ? el('button', { type: 'button', class: 'tr-reset', onclick: () => ((trade.rate = 100), commit({ rate: 100 })) }, 'Reset to 100%') : null),
     slider,
-    el('div', { class: 'tr-scale', 'aria-hidden': 'true' }, el('span', {}, '50%'), el('span', {}, '75%'), el('span', {}, '100%')),
+    el('div', { class: 'tr-scale', 'aria-hidden': 'true' }, el('span', {}, '80%'), el('span', {}, '90%'), el('span', {}, '100%')),
     el('div', { class: 'tr-side' }, el('span', { class: 'muted small' }, 'Applies to'), sideBtn('give'), sideBtn('get')),
-    el('p', { class: 'muted small tr-hint' }, trade.rate < 100 ? `${trade.rateSide === 'give' ? 'Your cards' : 'Their cards'} count at ${trade.rate}% of market value, like a shop's trade-in credit.` : 'At 100% every card counts at full market value. Slide down for trade-in offers, e.g. 80%.'),
+    el('p', { class: 'muted small tr-hint' }, trade.rate < 100 ? `${trade.rateSide === 'give' ? 'Your cards' : 'Their cards'} count at ${trade.rate}% of market value, like a shop's trade-in credit.` : 'At 100% every card counts at full market value. Slide down (to 80%) for trade-in offers.'),
   );
 }
 
@@ -480,7 +482,7 @@ function updateNumbers() {
     if (t) t.textContent = sideTotal(ev[s]);
   }
   const hint = $('#view-trade .tr-hint');
-  if (hint) hint.textContent = trade.rate < 100 ? `${trade.rateSide === 'give' ? 'Your cards' : 'Their cards'} count at ${trade.rate}% of market value, like a shop's trade-in credit.` : 'At 100% every card counts at full market value. Slide down for trade-in offers, e.g. 80%.';
+  if (hint) hint.textContent = trade.rate < 100 ? `${trade.rateSide === 'give' ? 'Your cards' : 'Their cards'} count at ${trade.rate}% of market value, like a shop's trade-in credit.` : 'At 100% every card counts at full market value. Slide down (to 80%) for trade-in offers.';
 }
 
 function sideSection(side, ev) {
