@@ -66,3 +66,16 @@
 .trade-undo { display: flex; align-items: center; gap: 14px; white-space: nowrap; }
 .trade-undo button { background: none; border: 0; padding: 4px 2px; color: var(--accent); font: inherit; font-weight: 800; cursor: pointer; }
 .trade-text { width: 100%; font: inherit; font-size: .85rem; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
+
+/* ---------- trade value % (e.g. a shop's 80% trade-in credit) ---------- */
+.trade-rate {
+  margin: 10px 0 4px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.tr-head { display: flex; align-items: baseline; gap: 8px; font-weight: 600; }
+.tr-value { font-size: 1.15rem; color: var(--accent); font-variant-numeric: tabular-nums; }
+.tr-reset { margin-left: auto; background: none; border: 0; color: var(--link); font: inherit; font-size: .85rem; padding: 6px 0; }
+.tr-slider { width: 100%; height: 36px; margin: 2px 0 0; accent-color: var(--accent); background: transparent; border: 0; padding: 0; }
+.tr-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: .72rem; margin-top: -4px; }
+.tr-side { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tr-side .chip { min-height: 36px; }
+.tr-hint { margin: 6px 0 0; }

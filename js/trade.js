@@ -5,6 +5,8 @@
 // The current trade is kept on the device in localStorage ('trade.v1'). Lines are saved
 // entries (see entry.js) plus pricedAt: when the card data their price comes from was
 // downloaded (ms). Collection and Batch entries don't have it; their price may be months old.
+// The trade also keeps a trade-value percentage (rate, 50–100) and the side it applies to
+// (rateSide): a shop crediting your cards at 80% of market is rate 80 on 'give'.
 import { $, el, on, emit, toast, confirmDialog, navigate } from './ui.js';
 import { getCard, cardFetchedAt } from './api.js';
 import { formatMoney } from './prices.js';
@@ -34,17 +36,24 @@ const fmtPct = (p) => `${p < 10 ? p.toFixed(1) : Math.round(p)}%`;
  * Returns { give, get: { usd, cards, unpriced }, diff (get − give, USD), pct (of the bigger side), unpriced, verdict: { kind, text } }
  *   kind: 'empty' | 'unknown' | 'fair' | 'ahead' | 'behind'
  */
-export function evaluateTrade({ give = [], get = [] } = {}) {
-  const side = (list) => ({
-    usd: cents(totalUsd(list)) / 100,
-    cards: list.reduce((s, e) => s + (e.qty || 1), 0),
-    unpriced: list.reduce((s, e) => s + (unitUsd(e) == null ? e.qty || 1 : 0), 0),
-  });
-  const g = side(give);
-  const r = side(get);
+export function evaluateTrade({ give = [], get = [], rate = 100, rateSide = 'give' } = {}) {
+  const pct = clampRate(rate);
+  const side = (list, s) => {
+    const market = cents(totalUsd(list));
+    const counted = s === rateSide && pct < 100 ? Math.round((market * pct) / 100) : market;
+    return {
+      usd: counted / 100, // what this side counts for in the trade
+      market: market / 100, // full market value
+      rate: s === rateSide ? pct : 100,
+      cards: list.reduce((n, e) => n + (e.qty || 1), 0),
+      unpriced: list.reduce((n, e) => n + (unitUsd(e) == null ? e.qty || 1 : 0), 0),
+    };
+  };
+  const g = side(give, 'give');
+  const r = side(get, 'get');
   const diffC = cents(r.usd) - cents(g.usd);
   const bigC = Math.max(cents(g.usd), cents(r.usd));
-  const pct = bigC ? (Math.abs(diffC) / bigC) * 100 : 0;
+  const diffPct = bigC ? (Math.abs(diffC) / bigC) * 100 : 0;
   const diff = diffC / 100;
   const blind = g.unpriced === g.cards ? 'give' : r.unpriced === r.cards ? 'get' : null; // no card on that side has a price
   let verdict;
@@ -56,7 +65,12 @@ export function evaluateTrade({ give = [], get = [] } = {}) {
   else if (Math.abs(diffC) * 20 <= bigC) verdict = { kind: 'fair', text: 'Fair trade (within 5%)' };
   else if (diffC > 0) verdict = { kind: 'ahead', text: `You come out ahead by ${formatMoney(diff)}` };
   else verdict = { kind: 'behind', text: `You'd lose ${formatMoney(-diff)}` };
-  return { give: g, get: r, diff, pct, unpriced: g.unpriced + r.unpriced, verdict };
+  return { give: g, get: r, diff, pct: diffPct, unpriced: g.unpriced + r.unpriced, verdict };
+}
+
+/** Trade value % in 5% steps between 50 and 100. (A function declaration: load() uses it at start-up.) */
+export function clampRate(r) {
+  return Math.min(100, Math.max(50, Math.round((Number(r) || 100) / 5) * 5));
 }
 
 function unpricedSide(side, n) {
@@ -70,16 +84,16 @@ function load() {
   try {
     const t = JSON.parse(localStorage.getItem(KEY));
     const list = (a) => (Array.isArray(a) ? a.filter((e) => e && e.id) : []);
-    return { give: list(t?.give), get: list(t?.get) };
+    return { give: list(t?.give), get: list(t?.get), rate: clampRate(t?.rate ?? 100), rateSide: t?.rateSide === 'get' ? 'get' : 'give' };
   } catch {
-    return { give: [], get: [] };
+    return { give: [], get: [], rate: 100, rateSide: 'give' };
   }
 }
 
 /** Save and redraw, then tell other views ('trade:changed', see ui.js) what changed. */
 function commit(change = {}) {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ give: trade.give, get: trade.get, updated: Date.now() }));
+    localStorage.setItem(KEY, JSON.stringify({ give: trade.give, get: trade.get, rate: trade.rate, rateSide: trade.rateSide, updated: Date.now() }));
   } catch {
     toast('Could not save the trade — phone storage is full');
   }
@@ -222,7 +236,7 @@ function onCardAction(detail) {
 }
 
 function swapSides() {
-  trade = { give: trade.get, get: trade.give };
+  trade = { ...trade, give: trade.get, get: trade.give };
   if (pendingUndo) pendingUndo.side = OTHER[pendingUndo.side]; // the removed card belongs with its old list
   commit({ swapped: true });
   toast('Sides swapped');
@@ -231,7 +245,7 @@ function swapSides() {
 async function clearTrade() {
   if (!trade.give.length && !trade.get.length) return;
   if (!(await confirmDialog('Remove every card from this trade?', 'Clear trade'))) return;
-  trade = { give: [], get: [] };
+  trade = { ...trade, give: [], get: [] }; // the trade-value setting stays
   dropUndo();
   commit();
 }
@@ -278,7 +292,8 @@ function shareText(ev = evaluateTrade(trade)) {
     const where = [e.setName, entryNumber(e)].filter(Boolean).join(' ');
     return `• ${q > 1 ? `${q}× ` : ''}${e.name}${where ? ` (${where})` : ''}${e.variant ? ` · ${e.variant}` : ''} — ${price}`;
   };
-  const side = (s) => [`${SIDES[s]}: ${formatMoney(ev[s].usd)} (${cardsLabel(ev[s].cards)})`, ...trade[s].map(line)];
+  const counted = (s) => (ev[s].rate < 100 ? ` — counted at ${ev[s].rate}%: ${formatMoney(ev[s].usd)}` : '');
+  const side = (s) => [`${SIDES[s]}: ${formatMoney(ev[s].market)} (${cardsLabel(ev[s].cards)})${counted(s)}`, ...trade[s].map(line)];
   const out = ['Pokémon card trade', '', ...side('give'), '', ...side('get'), '', ev.verdict.text];
   if (ev.verdict.kind !== 'empty' && ev.verdict.kind !== 'unknown') out.push(`Difference: ${formatMoney(Math.abs(ev.diff))} (${fmtPct(ev.pct)} of the bigger side)`);
   if (ev.unpriced) out.push(`${cardsLabel(ev.unpriced)} without a price counted as $0.`);
@@ -382,7 +397,13 @@ function summary(ev) {
   // Keep a sliver of each priced side visible.
   const width = ev.give.usd && ev.get.usd ? Math.min(98.5, Math.max(1.5, giveShare)) : giveShare;
   const sideBox = (s) =>
-    el('div', { class: `ts-side ${s}` }, el('span', { class: 'ts-label' }, SIDES[s]), el('b', { class: 'ts-amount' }, formatMoney(ev[s].usd)), el('span', { class: 'ts-count' }, cardsLabel(ev[s].cards)));
+    el(
+      'div',
+      { class: `ts-side ${s}` },
+      el('span', { class: 'ts-label' }, SIDES[s]),
+      el('b', { class: 'ts-amount' }, formatMoney(ev[s].usd)),
+      el('span', { class: 'ts-count' }, ev[s].rate < 100 ? `${ev[s].rate}% of ${formatMoney(ev[s].market)}` : cardsLabel(ev[s].cards)),
+    );
   const compared = ev.verdict.kind !== 'empty' && ev.verdict.kind !== 'unknown';
   return el(
     'div',
@@ -407,13 +428,68 @@ function summary(ev) {
   );
 }
 
+function sideTotal(s) {
+  return s.rate < 100 ? `${formatMoney(s.market)} → ${formatMoney(s.usd)} at ${s.rate}%` : formatMoney(s.usd);
+}
+
+/** Trade-value slider: count one side at 50–100% of market (e.g. a shop's 80% trade-in credit). */
+function rateControl() {
+  const label = el('b', { class: 'tr-value' }, `${trade.rate}%`);
+  const slider = el('input', {
+    type: 'range', min: 50, max: 100, step: 5, value: trade.rate, id: 'trade-rate', class: 'tr-slider',
+    'aria-label': 'Trade value percentage', 'aria-valuetext': `${trade.rate}%`,
+  });
+  // While dragging only the numbers update, so the slider isn't redrawn under the finger.
+  slider.addEventListener('input', () => {
+    trade.rate = clampRate(slider.value);
+    label.textContent = `${trade.rate}%`;
+    slider.setAttribute('aria-valuetext', `${trade.rate}%`);
+    updateNumbers();
+  });
+  slider.addEventListener('change', () => commit({ rate: trade.rate }));
+  const sideBtn = (s) =>
+    el(
+      'button',
+      {
+        type: 'button', class: `chip${trade.rateSide === s ? ' active' : ''}`, 'aria-pressed': trade.rateSide === s ? 'true' : 'false',
+        onclick: () => {
+          if (trade.rateSide === s) return;
+          trade.rateSide = s;
+          commit({ rate: trade.rate });
+        },
+      },
+      s === 'give' ? 'Your cards' : 'Their cards',
+    );
+  return el(
+    'div',
+    { class: 'trade-rate' },
+    el('div', { class: 'tr-head' }, el('span', {}, 'Trade value'), label, trade.rate < 100 ? el('button', { type: 'button', class: 'tr-reset', onclick: () => ((trade.rate = 100), commit({ rate: 100 })) }, 'Reset to 100%') : null),
+    slider,
+    el('div', { class: 'tr-scale', 'aria-hidden': 'true' }, el('span', {}, '50%'), el('span', {}, '75%'), el('span', {}, '100%')),
+    el('div', { class: 'tr-side' }, el('span', { class: 'muted small' }, 'Applies to'), sideBtn('give'), sideBtn('get')),
+    el('p', { class: 'muted small tr-hint' }, trade.rate < 100 ? `${trade.rateSide === 'give' ? 'Your cards' : 'Their cards'} count at ${trade.rate}% of market value, like a shop's trade-in credit.` : 'At 100% every card counts at full market value. Slide down for trade-in offers, e.g. 80%.'),
+  );
+}
+
+/** Refresh just the totals and verdict (used while the slider moves). */
+function updateNumbers() {
+  const ev = evaluateTrade(trade);
+  $('#view-trade .trade-summary')?.replaceWith(summary(ev));
+  for (const s of ['give', 'get']) {
+    const t = $(`#trade-${s} .tside-total`);
+    if (t) t.textContent = sideTotal(ev[s]);
+  }
+  const hint = $('#view-trade .tr-hint');
+  if (hint) hint.textContent = trade.rate < 100 ? `${trade.rateSide === 'give' ? 'Your cards' : 'Their cards'} count at ${trade.rate}% of market value, like a shop's trade-in credit.` : 'At 100% every card counts at full market value. Slide down for trade-in offers, e.g. 80%.';
+}
+
 function sideSection(side, ev) {
   const list = trade[side];
   const btn = (label, onclick) => el('button', { class: 'btn small', type: 'button', onclick }, label);
   return el(
     'section',
     { class: `trade-side ${side}`, id: `trade-${side}`, 'aria-labelledby': `trade-${side}-title` },
-    el('div', { class: 'tside-head' }, el('h2', { id: `trade-${side}-title` }, SIDES[side]), el('span', { class: 'tside-total' }, formatMoney(ev[side].usd))),
+    el('div', { class: 'tside-head' }, el('h2', { id: `trade-${side}-title` }, SIDES[side]), el('span', { class: 'tside-total' }, sideTotal(ev[side]))),
     list.length
       ? el(
           'ul',
@@ -445,6 +521,7 @@ export function renderTrade() {
   view.style.setProperty('--trade-top', `${$('.topbar')?.offsetHeight || 0}px`);
   view.replaceChildren(
     summary(ev),
+    rateControl(),
     el(
       'div',
       { class: 'trade-sides' },

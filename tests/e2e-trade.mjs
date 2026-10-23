@@ -405,6 +405,43 @@ t.check(
 );
 await shot('fair');
 
+// ---- trade value %: count one side at a percentage of market (e.g. 80% shop trade-in) ----
+{
+  const slide = (v, release = true) =>
+    page.evaluate(
+      ([v, release]) => {
+        const r = document.querySelector('#trade-rate');
+        r.value = v;
+        r.dispatchEvent(new Event('input', { bubbles: true }));
+        if (release) r.dispatchEvent(new Event('change', { bubbles: true }));
+      },
+      [v, release],
+    );
+  const sliderBefore = await page.evaluate(() => document.querySelector('#trade-rate'));
+  await slide(80, false); // mid-drag: numbers update, the slider element stays the same
+  const sameSlider = await page.evaluate((el) => el === document.querySelector('#trade-rate'), sliderBefore);
+  let r = await state();
+  t.check(
+    'slider at 80% on your cards: $28.00 counts as $22.40 while dragging',
+    sameSlider && r.give === '$22.40' && r.giveCount === '80% of $28.00' && r.giveTotal === '$28.00 → $22.40 at 80%' && r.verdict === 'You come out ahead by $4.69',
+    JSON.stringify(r),
+  );
+  await slide(80);
+  await page.click('.tr-side .chip:has-text("Their cards")');
+  r = await state();
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('trade.v1')));
+  t.check(
+    'applies to their cards instead; the setting is saved with the trade',
+    r.get === '$21.67' && r.give === '$28.00' && r.verdict === "You'd lose $6.33" && saved.rate === 80 && saved.rateSide === 'get',
+    JSON.stringify({ r, rate: saved.rate, side: saved.rateSide }),
+  );
+  await shot('rate-80');
+  await page.click('.tr-reset');
+  r = await state();
+  t.check('Reset to 100% restores full market value', r.give === '$28.00' && r.get === '$27.09' && r.verdict === 'Fair trade (within 5%)' && !(await page.$('.tr-reset')), JSON.stringify(r));
+  await page.click('.tr-side .chip:has-text("Your cards")');
+}
+
 // ---- prices stay current: copies from the collection / Batch tab, Refresh in the same session ----
 {
   const OLD = Date.now() - 120 * 864e5; // a price saved four months ago

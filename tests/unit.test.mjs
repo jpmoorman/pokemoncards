@@ -316,3 +316,26 @@ test('set picker filters by code or name', async () => {
   assert.equal(ids('').length, list.length);
   assert.equal(setLabel(list[1]), 'POR · Perfect Order');
 });
+
+test('trade value %: one side counts at a percentage of market', async () => {
+  globalThis.localStorage ??= { getItem: () => null, setItem: () => {} };
+  const { evaluateTrade, clampRate } = await import('../js/trade.js');
+  const e = (usd, qty = 1) => ({ id: 'x', price: { value: usd, currency: 'USD' }, qty });
+  const give = [e(6.16), e(6.23), e(9.41)]; // $21.80
+  const get = [e(5.45), e(5.13), e(6.23)]; // $16.81
+  const full = evaluateTrade({ give, get });
+  assert.equal(full.give.usd, 21.8);
+  assert.equal(full.verdict.text, "You'd lose $4.99");
+  const shop = evaluateTrade({ give, get, rate: 80, rateSide: 'give' });
+  assert.equal(shop.give.market, 21.8);
+  assert.equal(shop.give.usd, 17.44); // 80% of $21.80
+  assert.equal(shop.give.rate, 80);
+  assert.equal(shop.get.rate, 100);
+  assert.equal(shop.verdict.kind, 'fair'); // $17.44 vs $16.81 is within 5%
+  const theirs = evaluateTrade({ give, get, rate: 80, rateSide: 'get' });
+  assert.equal(theirs.get.usd, 13.45);
+  assert.equal(theirs.give.usd, 21.8);
+  assert.equal(clampRate(83), 85);
+  assert.equal(clampRate(10), 50);
+  assert.equal(clampRate(undefined), 100);
+});
