@@ -1,11 +1,11 @@
 // App shell: tabs, the Scan and Search views, and start-up.
-import { $, $$, el, on, toast, setStatus, emit } from './ui.js';
+import { $, $$, el, on, toast, actionToast, setStatus, emit } from './ui.js';
 import { initCatalog, catalog, catalogReady } from './catalog.js';
 import { manualSearch } from './match.js';
 import { startCamera, stopCamera, captureGuide, fileToCanvas, getWorker, setTorch, torchSupported } from './ocr.js';
 import { identify } from './identify.js';
 import { loadRate } from './fx.js';
-import { initSheet, showResults, openCard, fillSetSelect, parseNumberInput } from './sheet.js';
+import { initSheet, showResults, openCard, closeSheet, fillSetSelect, parseNumberInput } from './sheet.js';
 import { cardTile } from './components.js';
 import { initCollection, renderCollection } from './collection.js';
 import { initBatch, renderBatch, enqueueCanvas, enqueueFiles, batchCount } from './batch.js';
@@ -17,7 +17,9 @@ const state = {
   torch: false,
   busy: false,
   batchMode: false,
+  resumeBatch: false, // batch mode was on before adding cards to a trade
   tradeSide: null, // 'give' | 'get' while scanning cards for a trade
+  ready: null, // a finished scan not shown yet: { ranked, clues, debug, opts }
 };
 
 const VIEWS = ['scan', 'batch', 'trade', 'search', 'collection'];
@@ -104,6 +106,7 @@ function showView(name) {
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   if (name === 'scan') {
     if (state.wantCamera) openCamera();
+    if (state.ready && $('#sheet').hidden) showScan(state.ready);
   } else {
     closeCamera();
   }
@@ -126,6 +129,7 @@ function bindScan() {
   });
   $('#btn-mode').addEventListener('click', () => {
     state.batchMode = !state.batchMode;
+    state.resumeBatch = false; // the user's own choice stays
     updateModeButton();
     setStatus(
       '#scan-status',
@@ -154,16 +158,24 @@ function updateModeButton() {
 }
 
 function setTradeSide(side) {
-  state.tradeSide = side;
-  const banner = $('#scan-target');
-  banner.hidden = !side;
-  if (side) {
-    $('#scan-target-label').textContent = `Adding cards to: ${side === 'give' ? 'You give' : 'You get'}`;
+  if (side && !state.tradeSide) {
+    // Cards for a trade are identified one by one; batch mode comes back afterwards.
+    state.resumeBatch = state.batchMode;
     if (state.batchMode) {
       state.batchMode = false;
       updateModeButton();
+      toast('Batch mode is paused while you add cards to the trade', 3000);
     }
+  } else if (!side && state.tradeSide && state.resumeBatch) {
+    state.resumeBatch = false;
+    state.batchMode = true;
+    updateModeButton();
+    setStatus('#scan-status', 'Batch mode is on again: every photo is saved for later.');
   }
+  state.tradeSide = side;
+  const banner = $('#scan-target');
+  banner.hidden = !side;
+  if (side) $('#scan-target-label').textContent = `Adding cards to: ${side === 'give' ? 'You give' : 'You get'}`;
 }
 
 async function openCamera() {
@@ -193,7 +205,7 @@ async function scanFromCamera() {
   const canvas = captureGuide($('#video'), $('#guide'));
   if (state.batchMode) {
     flashGuide();
-    if (await enqueueCanvas(canvas)) toast(`Saved for later · ${batchCount()} in batch`, 1400);
+    if (await enqueueCanvas(canvas, { tradeSide: state.tradeSide })) toast(`Saved for later · ${batchCount()} in batch`, 1400);
     return;
   }
   await runScan(canvas);
@@ -211,8 +223,9 @@ async function onFiles(e) {
   e.target.value = '';
   if (!files.length || state.busy) return;
   if (state.batchMode || files.length > 1) {
-    const n = await enqueueFiles(files);
-    if (n) toast(`${n} photo${n > 1 ? 's' : ''} added to batch`);
+    // Several photos go to the batch (it says how many were saved). For a trade they are
+    // marked with the side, so the Batch tab offers to send just those.
+    const n = await enqueueFiles(files, { tradeSide: state.tradeSide });
     if (!state.batchMode && n) showView('batch');
     return;
   }
@@ -225,12 +238,14 @@ async function onFiles(e) {
 
 async function runScan(canvas) {
   state.busy = true;
+  state.ready = null;
+  const opts = { tradeSide: state.tradeSide, owner: 'scan' };
   $('#guide').classList.add('busy');
   $('#btn-scan').disabled = true;
   try {
     const { ranked, clues, debug } = await identify(canvas, (m) => setStatus('#scan-status', m));
     setStatus('#scan-status', '');
-    showResults(ranked, clues, debug, { tradeSide: state.tradeSide });
+    deliver({ ranked, clues, debug, opts });
   } catch (e) {
     console.error(e);
     setStatus('#scan-status', `Scan failed: ${e.message}`, true);
@@ -241,8 +256,38 @@ async function runScan(canvas) {
   }
 }
 
+const scanActive = () => $('#view-scan').classList.contains('active');
+
+/** Show a finished scan, unless the user moved on (another tab or another sheet): then keep it and offer it. */
+function deliver(res) {
+  if (scanActive() && $('#sheet').hidden) return showScan(res);
+  state.ready = res;
+  offerScan(); // and again when the sheet in the way closes
+}
+
+function showScan(res) {
+  state.ready = null;
+  showResults(res.ranked, res.clues, res.debug, res.opts);
+}
+
+function offerScan() {
+  const name = state.ready.ranked[0]?.card.name;
+  actionToast(name ? `Scan ready: ${name}` : 'Scan finished', 'View', () => {
+    const res = state.ready;
+    if (!res) return;
+    state.ready = null; // before closing a sheet, so closing doesn't offer it again
+    if (!$('#sheet').hidden) closeSheet();
+    showScan(res);
+  }, { ms: 8000 });
+}
+
 on('sheet:closed', () => {
-  if ($('#view-scan').classList.contains('active') && state.stream && !state.busy) {
+  if (state.ready) {
+    if (scanActive()) showScan(state.ready);
+    else offerScan();
+    return;
+  }
+  if (scanActive() && state.stream && !state.busy) {
     setStatus('#scan-status', state.tradeSide ? 'Ready for the next card for this trade.' : 'Ready for the next card.');
   }
 });

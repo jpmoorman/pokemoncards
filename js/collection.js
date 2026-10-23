@@ -78,12 +78,15 @@ export function initCollection() {
     if (!items.length) return;
     const btn = $('#btn-refresh-prices');
     btn.disabled = true;
-    const out = [];
+    const prices = new Map();
     for (const [n, i] of items.entries()) {
       btn.textContent = `Refreshing ${n + 1}/${items.length}…`;
-      out.push(await refreshEntry(i));
+      prices.set(entryKey(i), (await refreshEntry(i)).price);
     }
-    save(out);
+    // Cards may have been added or changed meanwhile (Batch, a scan, −/+): only update prices.
+    const all = loadCollection();
+    for (const it of all) if (prices.has(entryKey(it))) it.price = prices.get(entryKey(it));
+    save(all);
     renderCollection();
     btn.disabled = false;
     btn.textContent = 'Refresh prices';

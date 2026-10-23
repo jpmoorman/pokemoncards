@@ -24,6 +24,23 @@ export function toast(msg, ms = 2200) {
   setTimeout(() => t.remove(), ms);
 }
 
+/** A toast with one button (Undo, View…). onEnd(tapped) runs once its time is up, even if a newer toast replaced it. */
+export function actionToast(msg, label, onAction, { ms = 5000, onEnd } = {}) {
+  document.querySelectorAll('.toast[data-plain]').forEach((n) => n.remove());
+  let tapped = false;
+  const onclick = () => {
+    tapped = true;
+    t.remove();
+    onAction();
+  };
+  const t = el('div', { class: 'toast toast-action', role: 'status', 'data-plain': true }, el('span', {}, msg), el('button', { type: 'button', onclick }, label));
+  document.body.append(t);
+  setTimeout(() => {
+    t.remove();
+    onEnd?.(tapped);
+  }, ms);
+}
+
 export function setStatus(target, msg, isError = false) {
   const s = typeof target === 'string' ? $(target) : target;
   if (!s) return;
@@ -32,13 +49,14 @@ export function setStatus(target, msg, isError = false) {
 }
 
 // ---- event bus ----
-// 'card:action'  detail: { action: 'collection' | 'trade-give' | 'trade-get', card, row, entry }
+// 'card:action'  detail: { action: 'collection' | 'trade-give' | 'trade-get', card, row, entry, owner? }
+//                 owner is the opts.owner the sheet was opened with (see sheet.js showResults)
 // 'app:navigate' detail: { view: 'scan' | 'batch' | 'trade' | 'search' | 'collection', tradeSide?: 'give' | 'get', batchMode?: true }
 //                 navigate('scan', { tradeSide: 'give' }) opens the scanner in "adding cards to You give" mode;
 //                 navigate('scan', { batchMode: true }) opens it with Batch mode switched on;
 //                 navigate('search', { tradeSide: 'get' }) does the same for Search.
 // 'batch:changed' detail: {}  (queue size changed)
-// 'sheet:closed'  detail: {}
+// 'sheet:closed'  detail: { owner? }
 // 'catalog:ready' detail: {}
 // 'fx:ready'     detail: { rate, date, fallback }
 export function emit(name, detail) {

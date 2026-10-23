@@ -101,6 +101,72 @@ await page.click('.tab[data-view="collection"]');
 const migrated = await page.evaluate(() => ({ total: document.querySelector('#collection-total').textContent, text: document.querySelector('#collection-list').textContent }));
 t.check('old EUR saves are shown in USD', migrated.total === '$3,741.60' && migrated.text.includes('001/197') && !migrated.text.includes('€'), JSON.stringify(migrated));
 
+// Refresh prices while cards are added or counted up elsewhere: nothing done meanwhile is lost.
+// Prices cached more than 12 h ago and a slow network make the refresh take a few seconds.
+await page.evaluate(
+  () =>
+    new Promise((resolve) => {
+      const r = indexedDB.open('pokecard-scanner');
+      r.onsuccess = () => {
+        const tx = r.result.transaction('kv', 'readwrite');
+        const s = tx.objectStore('kv');
+        const q = s.getAllKeys();
+        q.onsuccess = () =>
+          q.result.filter((k) => String(k).startsWith('card:')).forEach((k) => {
+            const g = s.get(k);
+            g.onsuccess = () => s.put({ ...g.result, t: 0 }, k);
+          });
+        tx.oncomplete = () => {
+          r.result.close();
+          resolve();
+        };
+      };
+    }),
+);
+const slow = /api\.tcgdex\.net\/v2\/en\/cards\/(base1-4|sv03-001)$/;
+await h.context.route(slow, async (route) => {
+  await new Promise((r) => setTimeout(r, 1500));
+  await route.fallback();
+});
+await page.reload();
+await page.click('.tab[data-view="collection"]');
+await page.click('#btn-refresh-prices');
+await page.waitForFunction(() => /Refreshing/.test(document.querySelector('#btn-refresh-prices').textContent));
+await page.click('#collection-list .citem:first-child [aria-label="Add one"]');
+await page.click('.tab[data-view="search"]');
+await page.selectOption('#q-set', '');
+await page.fill('#q-name', 'Aurorus');
+await page.fill('#q-number', '024');
+await page.click('#search-form button[type="submit"]');
+await page.click('#search-results .tile');
+await page.click('.actions .btn:has-text("Add to collection")');
+await page.click('.sheet-close');
+const during = await page.textContent('#btn-refresh-prices');
+await page.click('.tab[data-view="collection"]');
+await page.waitForFunction(() => document.querySelector('#btn-refresh-prices').textContent === 'Refresh prices', null, { timeout: 30000 });
+await h.context.unroute(slow);
+const refreshed = await page.evaluate(() => JSON.parse(localStorage.getItem('collection.v1')).map((i) => `${i.name} ×${i.qty}`).join(', '));
+t.check(
+  'Refresh prices keeps a card added and a quantity changed while it runs',
+  /^Refreshing/.test(during) && refreshed === 'Aurorus ×1, Charizard ×2, Oddish ×1',
+  `${during} → ${refreshed}`,
+);
+
+// A card sheet opens at the top, even right after another sheet was scrolled down.
+await page.click('.tab[data-view="search"]');
+await page.click('#search-results .tile');
+await page.waitForFunction(() => document.querySelector('.headline-price')?.textContent.trim());
+await page.$eval('#sheet .sheet-panel', (p) => (p.scrollTop = 99999));
+await page.click('.sheet-close');
+await page.click('#search-results .tile');
+await page.waitForFunction(() => document.querySelector('.headline-price')?.textContent.trim());
+const top = await page.evaluate(() => {
+  const name = document.querySelector('.detail-name').getBoundingClientRect();
+  return { scrollTop: document.querySelector('#sheet .sheet-panel').scrollTop, nameVisible: name.top >= 0 && name.bottom <= innerHeight };
+});
+await page.click('.sheet-close');
+t.check('re-opening a card sheet starts at the top (name and price visible)', top.scrollTop === 0 && top.nameVisible, JSON.stringify(top));
+
 // Live camera path: feed a fake camera stream (needs ffmpeg) and press the shutter.
 let haveFfmpeg = true;
 try {

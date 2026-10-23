@@ -86,6 +86,9 @@ export function torchSupported(stream) {
   return !!track?.getCapabilities?.().torch;
 }
 
+// Pictures from captureGuide: readCard reads them as the card itself.
+const guideCrops = new WeakSet();
+
 /**
  * Grab the part of the video frame that sits under the on-screen card guide.
  * The video is shown with object-fit: cover, so map screen coords back to video pixels.
@@ -111,6 +114,7 @@ export function captureGuide(video, guideEl) {
   c.width = Math.round(sw);
   c.height = Math.round(sh);
   c.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  guideCrops.add(c);
   return c;
 }
 
@@ -258,9 +262,46 @@ function copy(canvas) {
   return c;
 }
 
-async function recognize(worker, canvas, psm) {
-  await worker.setParameters({ tessedit_pageseg_mode: String(psm), preserve_interword_spaces: '1' });
-  const { data } = await worker.recognize(canvas, {}, { text: true, blocks: true });
+/** The picture turned upside down. */
+function turnAround(canvas) {
+  const c = document.createElement('canvas');
+  c.width = canvas.width;
+  c.height = canvas.height;
+  const ctx = c.getContext('2d');
+  ctx.translate(c.width, c.height);
+  ctx.rotate(Math.PI);
+  ctx.drawImage(canvas, 0, 0);
+  return c;
+}
+
+/** Let the browser paint the latest status before a long synchronous step. */
+function nextPaint() {
+  if (typeof document === 'undefined' || document.hidden) return Promise.resolve();
+  // requestAnimationFrame waits while the page is hidden: the timeout covers that.
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+    setTimeout(resolve, 100);
+  });
+}
+
+// ---------- text recognition ----------
+
+// The page-segmentation mode is worker-wide state, so each read sets it and recognizes
+// while holding the shared worker: a live scan and a batch run take turns read by read
+// instead of switching each other's mode in between.
+let workerTurn = Promise.resolve();
+
+function withWorker(job) {
+  const run = workerTurn.then(() => getWorker()).then(job);
+  workerTurn = run.catch(() => {});
+  return run;
+}
+
+async function recognize(canvas, psm) {
+  const data = await withWorker(async (worker) => {
+    await worker.setParameters({ tessedit_pageseg_mode: String(psm), preserve_interword_spaces: '1' });
+    return (await worker.recognize(canvas, {}, { text: true, blocks: true })).data;
+  });
   const lines = [];
   for (const b of data.blocks || []) {
     for (const p of b.paragraphs || []) {
@@ -283,119 +324,256 @@ function looksLikeCard(canvas) {
 /**
  * OCR one area of a straightened card. region is in fractions of the card
  * ({ x, y, w, h }, e.g. ART_REGION). Returns { text, lines: [{ text, height, conf, y }] }.
- * For stamp detection: readRegion(result.card, ART_REGION).
  */
 export async function readRegion(card, region, { psm = 11, invert = false, targetW = 1600 } = {}) {
-  const worker = await getWorker();
-  return recognize(worker, enhance(crop(card, region, targetW), invert), psm);
+  return recognize(enhance(crop(card, region, targetW), invert), psm);
 }
 
-/**
- * Name + bottom-line OCR of one card-shaped image. `isKnown(name)` says whether a
- * read is a real card name; when it isn't, the name area is read again as one
- * block of text (sparse-text mode gets lost on some name bars).
- */
-async function readAreas(worker, card, onStatus, isKnown) {
-  onStatus?.('Reading card name…');
-  const nameImg = enhance(crop(card, NAME_REGION, 1600));
-  const nameRes = await recognize(worker, nameImg, 11);
-  let name = pickName(nameRes.lines);
-  let nameText = nameRes.text;
-  if (!isKnown(name.best) && !isKnown(nameRes.text)) {
-    const again = await recognize(worker, nameImg, 6);
-    nameText += `\n---block---\n${again.text}`;
-    const n2 = pickName(again.lines);
-    if (isKnown(n2.best) || isKnown(again.text) || !name.best) name = n2;
-  }
-  onStatus?.('Reading card number…');
-  const bottomBase = crop(card, BOTTOM_REGION, 2200);
-  const b1 = await recognize(worker, enhance(copy(bottomBase)), 11);
-  let bottomText = b1.text;
-  let bottom = parseBottomText(b1.text);
-  if (!bottom.numbers.length) {
-    // White text on dark full-art cards reads better inverted.
-    const b2 = await recognize(worker, enhance(copy(bottomBase), true), 11);
-    bottomText += `\n---inverted---\n${b2.text}`;
-    bottom = mergeBottom(bottom, parseBottomText(b2.text));
-  }
-  return { name, nameText, bottom, bottomText };
+/** Text on the lower artwork, where set logos, 1st Edition and other stamps sit (for stamps.js). */
+export async function readStamps(card) {
+  const res = await recognize(enhance(crop(card, STAMP_REGION, 1400)), 11);
+  return res.text.replace(/\n\s*\n/g, '\n').trim();
+}
+
+/** OCR confidence of the clearest line with some real text in it (0 when none). */
+function legible(lines, re) {
+  return Math.max(0, ...lines.filter((l) => re.test(l.text)).map((l) => l.conf));
+}
+
+/** Name-area OCR (sparse text). `conf`: how clearly it read, see legible. */
+async function readName(card, ocr) {
+  const img = enhance(crop(card, NAME_REGION, 1600));
+  const res = await ocr(img, 11);
+  return { name: pickName(res.lines), text: res.text, conf: legible(res.lines, /[A-Za-z]{3}/), img };
+}
+
+/** A name read that isn't a known card name, read again as one block of text (sparse-text mode gets lost on some name bars). */
+async function nameAgain(r, ocr, isKnown) {
+  if (isKnown(r.name.best) || isKnown(r.text)) return r;
+  const again = await ocr(r.img, 6);
+  const n2 = pickName(again.lines);
+  const name = isKnown(n2.best) || isKnown(again.text) || !r.name.best ? n2 : r.name;
+  return { ...r, name, text: `${r.text}\n---block---\n${again.text}` };
+}
+
+/** Bottom-line OCR (number, set code). */
+async function readBottom(card, ocr) {
+  const base = crop(card, BOTTOM_REGION, 2200);
+  const res = await ocr(enhance(copy(base)), 11);
+  return { bottom: parseBottomText(res.text), text: res.text, conf: legible(res.lines, /[A-Za-z0-9]{3}/), base };
+}
+
+/** A bottom read without a number, read again inverted: white text on dark full-art cards reads better that way. */
+async function bottomInverted(r, ocr) {
+  if (r.bottom.numbers.length) return r;
+  const res = await ocr(enhance(r.base, true), 11);
+  return { ...r, bottom: mergeBottom(r.bottom, parseBottomText(res.text)), text: `${r.text}\n---inverted---\n${res.text}` };
 }
 
 // Keep a sliver around a found card, in case an edge was found on its inner frame.
 const WARP_MARGIN = 0.015;
 
-/** Card-shaped images to read, best guess first: straightened card(s), then the picture as is. */
-function cardViews(canvas, found) {
-  const views = [];
-  if (found) {
-    views.push({ card: warpCard(canvas, found.corners, { margin: WARP_MARGIN }), how: 'found' });
-    if (found.landscape) views.push({ card: warpCard(canvas, rotateCorners(found.corners, 2), { margin: WARP_MARGIN }), how: 'turned' });
-    // Next-best outline (e.g. the toploader when we picked the card, or the other way round).
-    const alt = found.candidates[0];
-    if (alt) views.push({ card: warpCard(canvas, alt, { margin: WARP_MARGIN }), how: 'alternative' });
+/** A card-shaped picture to read, made when first needed. */
+function view(how, make) {
+  let card = null;
+  return {
+    how,
+    get card() {
+      return (card ||= make());
+    },
+  };
+}
+
+const outline = (canvas, how, corners) => view(how, () => warpCard(canvas, corners, { margin: WARP_MARGIN }));
+
+function findCard(canvas) {
+  try {
+    return detectCard(canvas);
+  } catch (e) {
+    console.warn('card detection failed', e);
+    return null;
   }
-  // Camera guide crops are already the card.
-  if (looksLikeCard(canvas) && !(found && found.area > 0.8)) views.push({ card: canvas, how: 'as is' });
-  return views.slice(0, 3);
+}
+
+const describe = (found) => (found ? `card found (score ${found.score.toFixed(2)}, ${found.ms} ms)` : 'no card outline found');
+
+/**
+ * What to read, best guess first:
+ *   first:  read in full (name, also in a second OCR mode; number, also inverted), or
+ *           lightly (one pass each) when `light`
+ *   turns:  the same card other ways up, tried when the first read is unclear: name
+ *           area first, the number area too if that doesn't settle it
+ *   others: other outlines (name in both OCR modes, number once)
+ * A camera guide crop is the card already (upright, or held upside down): the card is
+ * looked for only if reading it as is fails, and used only when it isn't the whole crop.
+ * In a photo the card is found first; a whole photo is read as is (lightly) only when
+ * no card was found in it.
+ */
+function plan(canvas, guide, found, debug) {
+  if (guide) {
+    return {
+      first: view('as is', () => canvas),
+      turns: [view('upside down', () => turnAround(canvas))],
+      others() {
+        const f = findCard(canvas);
+        debug.detect = describe(f);
+        return f && f.area < 0.8 ? [outline(canvas, 'found', f.corners)] : [];
+      },
+    };
+  }
+  if (!found) return { first: looksLikeCard(canvas) ? view('as is', () => canvas) : null, light: true, turns: [], others: () => [] };
+  const turns = found.whole
+    ? // Maybe half of a card lying sideways: the whole card, either way round.
+      [outline(canvas, 'sideways', found.whole), outline(canvas, 'sideways, turned', rotateCorners(found.whole, 2))]
+    : [outline(canvas, 'turned', rotateCorners(found.upsideDown || found.corners, 2))];
+  // Next-best outline (e.g. the toploader when we picked the card, or the other way round).
+  const alt = found.candidates[0];
+  return { first: outline(canvas, 'found', found.corners), turns, others: () => (alt ? [outline(canvas, 'alternative', alt)] : []) };
 }
 
 /**
  * Read a card image: the camera guide crop, or any photo with a card in it
- * (the card is found, straightened and then read).
+ * (the card is found, straightened and then read; turned around or sideways cards too).
  *   opts.findName(text) -> { name, score } | null | undefined
  *     optional dictionary lookup (identify.js passes the catalog). Finds a known card
  *     name inside OCR text; undefined means "can't tell" (catalog not loaded yet).
  * Returns {
- *   clues: { nameBest, nameAll, numbers, setCodes, codeCandidates, artText },
- *          artText: what was read on the lower artwork (STAMP_REGION), for stamps.js
- *   debug: { name, bottom, full, art, detect } raw OCR text per area + how the card was found,
- *   card:  the straightened card as a canvas (portrait, ~600–1000 px wide, 1.5% margin);
- *          a camera guide crop with no outline found is used as is; null when no card
- *          was found in a photo. Areas are fractions of it (NAME_REGION, BOTTOM_REGION,
- *          ART_REGION); OCR more of it with readRegion(card, region), e.g. for stamps.
+ *   clues: { nameBest, nameAll, numbers, setCodes, codeCandidates, artText: '' },
+ *          artText is for readStamps(card) to fill in (identify.js does when it matters)
+ *   debug: { name, bottom, full, detect, reads } raw OCR text per area, how the card was
+ *          found, and how many OCR passes it took,
+ *   card:  the card as read, as a canvas: straightened (portrait, ~600–1000 px wide, 1.5%
+ *          margin), or the camera guide crop; null when no card was found or read in a
+ *          photo. Areas are fractions of it (NAME_REGION, BOTTOM_REGION, ART_REGION); OCR
+ *          more of it with readRegion(card, region).
  * }
  */
 export async function readCard(canvas, onStatus, opts = {}) {
-  const worker = await getWorker();
-  const debug = { name: '', bottom: '', full: '', detect: '' };
-  onStatus?.('Finding the card…');
-  let found = null;
-  try {
-    found = detectCard(canvas);
-  } catch (e) {
-    console.warn('card detection failed', e);
-  }
-  debug.detect = found ? `card found (score ${found.score.toFixed(2)}, ${found.ms} ms)` : 'no card outline found';
-  const views = cardViews(canvas, found);
-
+  const debug = { name: '', bottom: '', full: '', detect: '', reads: 0 };
+  const ocr = (img, psm) => {
+    debug.reads++;
+    return recognize(img, psm);
+  };
   const seen = new Map();
   const lookup = (text) => {
     if (!opts.findName || !text) return undefined;
     if (!seen.has(text)) seen.set(text, opts.findName(text));
     return seen.get(text);
   };
-  const isKnown = (text) => {
+  const isKnown = (text, min = 0.75) => {
     const k = lookup(text);
-    return k === undefined ? !!text : !!k && k.score >= 0.75;
+    return k === undefined ? !!text : !!k && k.score >= min;
   };
-  let card = views[0]?.card || null;
+  // OCR of upside-down or sideways text can pass for a short name with a letter or two
+  // off; read the right way up, names nearly always come out whole.
+  const isSure = (text) => isKnown(text, 0.9);
+  const named = (n) => isKnown(n.name.best) || isKnown(n.text);
+  // Text the right way up mostly reads with OCR confidence well above 75, upside-down or
+  // sideways text below it: a known name read that clearly is the card the right way up.
+  const clear = (n) => isSure(n.name.best) || isSure(n.text) || (named(n) && n.conf >= 75);
+
+  const guide = guideCrops.has(canvas);
+  let found = null;
+  if (guide) {
+    debug.detect = 'camera guide crop';
+  } else {
+    onStatus?.('Finding the card…');
+    await nextPaint();
+    found = findCard(canvas);
+    debug.detect = describe(found);
+  }
+  const todo = plan(canvas, guide, found, debug);
+
+  // What was read from each view, for the debug text.
+  const tried = new Map();
+  const note = (v, n, b) => {
+    const t = tried.get(v) || {};
+    tried.set(v, { name: n?.text ?? t.name, bottom: b?.text ?? t.bottom });
+  };
+
+  let card = null;
   let bottom = { numbers: [], setCodes: [], codeCandidates: [] };
   let name = { best: '', all: '' };
   let nameText = '';
-  for (const [i, v] of views.entries()) {
-    const r = await readAreas(worker, v.card, onStatus, isKnown);
-    const label = views.length > 1 ? `[${v.how}]\n` : '';
-    debug.name += (i ? '\n' : '') + label + r.nameText;
-    debug.bottom += (i ? '\n' : '') + label + r.bottomText;
-    bottom = mergeBottom(bottom, r.bottom);
-    if (!isKnown(name.best) && (isKnown(r.name.best) || !name.best)) {
-      name = r.name;
-      card = v.card;
-    }
-    nameText += `\n${r.nameText}`;
-    // A number or a real name means this outline is the card; stop trying others.
-    if (bottom.numbers.length || isKnown(name.best) || isKnown(r.nameText)) break;
+  const use = (v, n, b) => {
+    card = v.card;
+    ({ name } = n);
+    nameText = n.text;
+    bottom = b.bottom;
+  };
+  // A number or a clearly read name means this is the card, the right way up.
+  const done = () => bottom.numbers.length || isSure(name.best) || isSure(nameText);
+
+  let first = null;
+  let turned = false;
+  if (todo.first) {
+    const v = todo.first;
+    onStatus?.('Reading card name…');
+    await nextPaint();
+    let n = await readName(v.card, ocr);
+    if (!todo.light) n = await nameAgain(n, ocr, isKnown);
+    onStatus?.('Reading card number…');
+    let b = await readBottom(v.card, ocr);
+    if (!todo.light) b = await bottomInverted(b, ocr);
+    note(v, n, b);
+    first = { n, b };
+    use(v, n, b);
+    // A whole photo read as is is only the card if it read like one.
+    if (todo.light && !done()) card = null;
   }
+
+  if (first && !bottom.numbers.length && !clear(first.n) && todo.turns.length) {
+    // Maybe the card is the other way round. Taken that way, a card name must read
+    // clearly (or be the only one read at all); failing that, the way round whose text
+    // reads with clearly higher OCR confidence wins.
+    const probes = [];
+    let turn = null;
+    for (const v of todo.turns) {
+      onStatus?.('Turning the card…');
+      const n = await readName(v.card, ocr);
+      note(v, n);
+      probes.push({ v, n });
+      if (isSure(n.name.best) || isSure(n.text) || (!named(first.n) && named(n))) {
+        turn = probes.at(-1);
+        break;
+      }
+    }
+    if (!turn) {
+      const p = probes.reduce((a, q) => (q.n.conf > a.n.conf ? q : a));
+      p.b = await readBottom(p.v.card, ocr);
+      note(p.v, null, p.b);
+      if (p.n.conf + p.b.conf > first.n.conf + first.b.conf + 10) turn = p;
+    }
+    if (turn) {
+      // It reads this way round: start over from here.
+      onStatus?.('Reading card number…');
+      const n = await nameAgain(turn.n, ocr, isKnown);
+      const b = await bottomInverted(turn.b || (await readBottom(turn.v.card, ocr)), ocr);
+      note(turn.v, n, b);
+      use(turn.v, n, b);
+      turned = true;
+    }
+  }
+
+  // Other outlines, unless the card was just found to be the other way round.
+  if (!done() && !turned) {
+    for (const v of todo.others()) {
+      onStatus?.('Reading card name…');
+      const n = await nameAgain(await readName(v.card, ocr), ocr, isKnown);
+      const b = await readBottom(v.card, ocr);
+      note(v, n, b);
+      bottom = mergeBottom(bottom, b.bottom);
+      if (!isKnown(name.best) && (isKnown(n.name.best) || !name.best)) {
+        name = n.name;
+        card = v.card;
+      }
+      nameText += `\n${n.text}`;
+      if (done()) break;
+    }
+  }
+  const label = (v) => (tried.size > 1 ? `[${v.how}]\n` : '');
+  debug.name = [...tried].filter(([, t]) => t.name != null).map(([v, t]) => label(v) + t.name).join('\n');
+  debug.bottom = [...tried].filter(([, t]) => t.bottom != null).map(([v, t]) => label(v) + t.bottom).join('\n');
 
   let fullText = '';
   if (!bottom.numbers.length || !isKnown(name.best)) {
@@ -403,7 +581,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
     // Nothing usable from any outline: maybe it wasn't the card, so read the whole picture.
     const src = bottom.numbers.length || isKnown(name.best) ? card || canvas : canvas;
     const full = enhance(crop(src, { x: 0, y: 0, w: 1, h: 1 }, Math.min(2000, Math.max(1200, src.width))));
-    const res = await recognize(worker, full, 11);
+    const res = await ocr(full, 11);
     debug.full = res.text;
     fullText = res.text;
     bottom = mergeBottom(bottom, parseBottomText(res.text));
@@ -427,21 +605,8 @@ export async function readCard(canvas, onStatus, opts = {}) {
     }
   }
 
-  // Stamps (set logo, 1st Edition, Play! Pokémon…) tell the versions apart; stamps.js reads them.
-  let artText = '';
-  if (card) {
-    onStatus?.('Checking for stamps…');
-    try {
-      const res = await recognize(worker, enhance(crop(card, STAMP_REGION, 1400)), 11);
-      artText = res.text.replace(/\n\s*\n/g, '\n').trim();
-    } catch (e) {
-      console.warn('artwork read failed', e);
-    }
-    debug.art = artText;
-  }
-
   return {
-    clues: { nameBest: name.best, nameAll: name.all, ...bottom, artText },
+    clues: { nameBest: name.best, nameAll: name.all, ...bottom, artText: '' },
     debug,
     card,
   };

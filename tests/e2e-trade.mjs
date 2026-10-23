@@ -4,7 +4,7 @@
 //   CHROMIUM_PATH=/opt/pw-browsers/chromium node tests/e2e-trade.mjs
 import fs from 'node:fs';
 import path from 'node:path';
-import { startHarness, makeCard, reporter, results, CARDS } from './harness.mjs';
+import { startHarness, makeCard, reporter, results, fixtures, CARDS } from './harness.mjs';
 
 const t = reporter();
 
@@ -26,6 +26,9 @@ const shot = (name) => page.screenshot({ path: path.join(results, `trade-${name}
       ahead: v([e(10)], [e(20, 2)]).text,
       empty: [v([e(10)], []).kind, v([], [e(1)]).kind, v([], []).kind],
       unknown: v([e(null)], [e(null)]).kind,
+      blindGive: v([e(null)], [e(5.28)]),
+      blindGet: v([e(250)], [e(null, 3)]),
+      partly: v([e(null), e(5)], [e(20)]).kind,
       unpriced: evaluateTrade({ give: [e(null, 2), e(5)], get: [e(10)] }),
       eur: evaluateTrade({ give: [{ id: 'a', price: { value: 10, currency: 'EUR' } }], get: [] }).give.usd,
       rate: fx().rate,
@@ -35,6 +38,13 @@ const shot = (name) => page.screenshot({ path: path.join(results, `trade-${name}
   t.check('just over 5% apart is not fair', m.over === "You'd lose $5.01", m.over);
   t.check('getting more = ahead', m.ahead === 'You come out ahead by $30.00', m.ahead);
   t.check('an empty side asks for cards; no prices at all = unknown', m.empty.every((k) => k === 'empty') && m.unknown === 'unknown');
+  t.check(
+    'a side where no card has a price is not judged (no "ahead" / "lose" against $0)',
+    m.blindGive.kind === 'unknown' && m.blindGive.text === "Can't judge: the card you give has no price — check eBay sold listings." &&
+      m.blindGet.kind === 'unknown' && m.blindGet.text === "Can't judge: none of the 3 cards you get have a price — check eBay sold listings." &&
+      m.partly === 'ahead',
+    JSON.stringify([m.blindGive, m.blindGet, m.partly]),
+  );
   const u = m.unpriced;
   t.check('unpriced cards count $0 and are counted by quantity', u.give.usd === 5 && u.give.cards === 3 && u.unpriced === 2 && u.pct === 50, JSON.stringify(u));
   t.check('old EUR saves are converted to USD', m.rate === 1.12 && m.eur === 11.2, `${m.eur} @ ${m.rate}`);
@@ -269,6 +279,21 @@ await page.click('.trade-undo button');
 s = await state();
 t.check('− on the last copy removes the card, Undo puts it back', removed && s.giveLines.length === 3 && s.giveLines[2].name === 'Mewtwo ex' && !!s.warn);
 
+// ---- Undo after Swap: the card goes back to the list it was removed from (now on the other side) ----
+{
+  const names = (lines) => lines.map((l) => l.name).join(', ');
+  await line('give', 'Mewtwo ex').locator('button[aria-label="Remove one"]').click();
+  await page.click('.trade-swap');
+  await page.click('.trade-undo button');
+  s = await state();
+  t.check(
+    'Undo after Swap sides puts the card back with the cards it came from',
+    names(s.getLines) === 'Charizard, Charizard ex, Mewtwo ex' && names(s.giveLines) === 'Aurorus, Charizard ex' && s.get === '$3,735.68' && s.give === '$75.82',
+    `give ${names(s.giveLines)} | get ${names(s.getLines)}`,
+  );
+  await page.click('.trade-swap'); // back to how it was
+}
+
 // ---- persists across reloads ----
 const before = await state();
 await page.reload();
@@ -318,13 +343,18 @@ await page.waitForSelector('.toast:has-text("Trade copied")', { timeout: 5000 })
 const clip = await page.evaluate(() => navigator.clipboard.readText().catch((e) => `ERR ${e.message}`));
 t.check('without Web Share it copies the summary to the clipboard', clip === text, clip.slice(0, 80));
 
-// ---- clear ----
+// ---- clear (with an Undo still showing: it must not bring a card back into the empty trade) ----
+await line('give', 'Mewtwo ex').locator('button[aria-label="Remove one"]').click();
 await page.click('#trade-clear');
 await page.waitForSelector('.modal-panel:has-text("Remove every card from this trade?")');
 await shot('clear-confirm');
 await page.click('.modal-panel .btn.primary:has-text("Clear trade")');
 s = await state();
 t.check('Clear trade empties both sides', !s.giveLines.length && !s.getLines.length && s.give === '$0.00' && s.kind === 'empty');
+const undoAfterClear = await page.locator('.trade-undo button').count();
+if (undoAfterClear) await page.click('.trade-undo button');
+s = await state();
+t.check('Clear trade drops a pending Undo', !undoAfterClear && !s.giveLines.length && !s.getLines.length, `undo buttons left: ${undoAfterClear}, give: ${s.giveLines.length}`);
 
 // ---- a fair multi-card trade ----
 await page.click('#trade-give button:has-text("Search")');
@@ -350,12 +380,201 @@ t.check(
 );
 await shot('fair');
 
+// ---- prices stay current: copies from the collection / Batch tab, Refresh in the same session ----
+{
+  const OLD = Date.now() - 120 * 864e5; // a price saved four months ago
+  const clearToasts = () => page.evaluate(() => document.querySelectorAll('.toast').forEach((n) => n.remove()));
+  const toastText = () => page.waitForSelector('.toast[data-plain]', { timeout: 15000 }).then((n) => n.textContent());
+  const pickRow = (variant) => page.locator('.trade-picker .citem').filter({ has: page.locator('.c-sub', { hasText: new RegExp(`^${variant}$`) }) });
+  await page.click('#trade-clear');
+  await page.click('.modal-panel .btn.primary:has-text("Clear trade")');
+  // The collection holds Charizard ex (Holo) at the $1.00 it had months ago; today it is $5.28.
+  await page.evaluate(async (old) => {
+    const { getCard } = await import('/js/api.js');
+    const { variantPrices } = await import('/js/prices.js');
+    const { makeEntry, entryKey } = await import('/js/entry.js');
+    const card = await getCard('sv03-125');
+    const e = { ...makeEntry(card, variantPrices(card).find((r) => r.label === 'Holo')), price: { value: 1, currency: 'USD', source: 'TCGplayer market', converted: false }, added: old };
+    const items = JSON.parse(localStorage.getItem('collection.v1') || '[]');
+    localStorage.setItem('collection.v1', JSON.stringify([{ ...e, key: entryKey(e) }, ...items]));
+  }, OLD);
+  await page.click('#trade-give button:has-text("Search")');
+  await searchAndOpen('sv03', '125', 'Charizard ex');
+  await chip('Holo').click();
+  await page.click('.actions .btn:has-text("Trade: I give")');
+  await tradeView();
+  await sheetClosed();
+  await page.click('#trade-give button:has-text("From collection")');
+  const pickerPrice = await pickRow('Holo').locator('.c-price').textContent();
+  await pickRow('Holo').locator('.tp-add').click();
+  await page.click('.trade-picker .tp-head .btn');
+  s = await state();
+  t.check(
+    "a second copy from the collection keeps today's price, not the collection's old one",
+    pickerPrice === '$1.00' && s.giveLines.length === 1 && s.giveLines[0].qty === '×2' && s.giveLines[0].price === '$10.56' && s.give === '$10.56',
+    `${pickerPrice} -> ${JSON.stringify(s.giveLines)}`,
+  );
+
+  // From collection onto an empty side: the old price is replaced by today's.
+  await page.click('#trade-get button:has-text("From collection")');
+  await pickRow('Holo').locator('.tp-add').click();
+  await page.click('.trade-picker .tp-head .btn');
+  await page.waitForFunction(() => document.querySelector('#trade-get .c-price')?.textContent === '$5.28', null, { timeout: 5000 }).catch(() => {});
+  s = await state();
+  t.check("a card from the collection is added at today's price", s.getLines.length === 1 && s.getLines[0].price === '$5.28' && s.get === '$5.28', JSON.stringify(s.getLines));
+
+  // Batch-style copies (entry only, priced who knows when) don't replace the line's price; a known newer price does.
+  const merged = await page.evaluate((old) => {
+    const give = () => JSON.parse(localStorage.getItem('trade.v1')).give[0];
+    const send = (entry) => document.dispatchEvent(new CustomEvent('card:action', { detail: { action: 'trade-give', card: null, row: null, entry } }));
+    const { pricedAt, ...base } = give();
+    send({ ...base, qty: 1, added: old, price: { value: 1, currency: 'USD', source: 'TCGplayer market', converted: false } });
+    const older = give(); // read straight away, before any price lookup
+    send({ ...base, qty: 1, pricedAt: Date.now() + 1000, price: { value: 7, currency: 'USD', source: 'TCGplayer market', converted: false } });
+    const newer = give();
+    return { older: [older.qty, older.price.value], newer: [newer.qty, newer.price.value] };
+  }, OLD);
+  t.check('merging copies: a saved price of unknown age never replaces a known one; a newer one does', merged.older.join() === '3,5.28' && merged.newer.join() === '4,7', JSON.stringify(merged));
+
+  // Refresh prices downloads again in the same session (the card was loaded minutes ago) and says so.
+  let fetches = 0;
+  await page.route('https://api.tcgdex.net/v2/en/cards/sv03-125', (route) => {
+    fetches++;
+    const card = JSON.parse(fs.readFileSync(path.join(fixtures, 'card-sv03-125.json')));
+    card.variants_detailed[0].pricing.tcgplayer.holofoil.marketPrice = 9.99;
+    route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(card) });
+  });
+  await clearToasts();
+  await page.click('#trade-refresh');
+  const refreshed = await toastText();
+  s = await state();
+  t.check(
+    'Refresh prices fetches new prices without a reload, once per card',
+    refreshed === 'Prices updated' && fetches === 1 && s.giveLines[0].price === '$39.96' && s.getLines[0].price === '$9.99' && s.get === '$9.99',
+    `${refreshed} fetches=${fetches} give=${s.giveLines[0]?.price} get=${s.getLines[0]?.price}`,
+  );
+
+  // Offline: keeps the prices it has and says it couldn't update them.
+  const mark = h.logs.length;
+  await page.route('https://api.tcgdex.net/v2/en/cards/**', (route) => route.abort('internetdisconnected'));
+  await clearToasts();
+  await page.click('#trade-refresh');
+  const offline = await toastText();
+  s = await state();
+  t.check('offline, Refresh prices keeps the saved prices and does not claim it updated them', /^Couldn't reach the price server/.test(offline) && s.getLines[0].price === '$9.99', `${offline} | ${s.getLines[0]?.price}`);
+  await page.unrouteAll();
+  for (let i = h.logs.length - 1; i >= mark; i--) if (/Failed to load resource/.test(h.logs[i])) h.logs.splice(i, 1);
+
+  // One side with no price at all: no verdict, neutral balance bar.
+  await page.click('#trade-clear');
+  await page.click('.modal-panel .btn.primary:has-text("Clear trade")');
+  await page.evaluate(() => {
+    const send = (action, entry) => document.dispatchEvent(new CustomEvent('card:action', { detail: { action, card: null, row: null, entry } }));
+    send('trade-give', { id: '30th-157', name: 'Mewtwo ex', setId: '30th', setName: '30th Celebration', number: '157/128', variant: 'Normal', variantId: 'generated-0', image: '', price: null, qty: 1, added: Date.now() });
+    send('trade-get', JSON.parse(localStorage.getItem('collection.v1')).find((i) => i.id === 'sv03-125' && i.variant === 'Holo'));
+  });
+  s = await state();
+  const bar = await page.evaluate(() => document.querySelector('.ts-bar').className);
+  t.check(
+    'Mewtwo ex (no price yet) for Charizard ex: no "You come out ahead"',
+    s.kind === 'unknown' && s.verdict === "Can't judge: the card you give has no price — check eBay sold listings." && !s.diff && bar.includes('empty') && /^1 card has no price/.test(s.warn || ''),
+    JSON.stringify({ verdict: s.verdict, diff: s.diff, bar }),
+  );
+  await shot('unpriced-side');
+}
+
 // ---- wide screen: sides next to each other ----
 await page.setViewportSize({ width: 1024, height: 800 });
 const sideBySide = await page.evaluate(() => document.querySelector('#trade-give').getBoundingClientRect().top === document.querySelector('#trade-get').getBoundingClientRect().top);
 t.check('wide screens show the sides next to each other', sideBySide);
 await shot('wide');
 await page.setViewportSize({ width: 390, height: 844 });
+
+// ---- long lists: the top bar stays at the top, the summary stays right under it ----
+{
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.evaluate(async () => {
+    const { getCard } = await import('/js/api.js');
+    const { variantPrices } = await import('/js/prices.js');
+    const { makeEntry } = await import('/js/entry.js');
+    const entries = [];
+    for (const id of ['base1-4', 'sv03-125', 'sv03-215', 'me03-024', '30th-157', 'sv03-001']) {
+      const card = await getCard(id);
+      for (const row of variantPrices(card)) entries.push(makeEntry(card, row));
+    }
+    localStorage.setItem('trade.v1', JSON.stringify({ give: entries.slice(0, 7), get: entries.slice(7, 13) }));
+    localStorage.setItem('collection.v1', JSON.stringify([...entries, ...entries]));
+  });
+  await page.reload();
+  const atBottom = async (tab) => {
+    await page.click(`.tab[data-view="${tab}"]`);
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await page.waitForTimeout(150);
+    return page.evaluate(() => {
+      const bar = document.querySelector('.topbar').getBoundingClientRect();
+      const sum = document.querySelector('#view-trade.active .trade-summary')?.getBoundingClientRect();
+      const under = document.elementFromPoint(180, bar.bottom + 4);
+      return { scrolled: Math.round(scrollY), bar: [Math.round(bar.top), Math.round(bar.bottom)], sum: sum && Math.round(sum.top), under: under?.closest('.trade-summary, .citem, .topbar')?.className || under?.tagName };
+    });
+  };
+  const tr = await atBottom('trade');
+  t.check('long trade: top bar and summary stay pinned at the bottom of the list', tr.scrolled > 700 && tr.bar[0] === 0 && tr.sum === tr.bar[1] && tr.under === 'trade-summary', JSON.stringify(tr));
+  await shot('long-360x740');
+  const col = await atBottom('collection');
+  t.check('long collection: top bar stays at the top', col.scrolled > 700 && col.bar[0] === 0, JSON.stringify(col));
+  for (const [w, hh] of [[360, 740], [390, 844]]) {
+    await page.setViewportSize({ width: w, height: hh });
+    await page.click('.tab[data-view="scan"]');
+    const scan = await page.evaluate(() => ({
+      scroll: document.documentElement.scrollHeight - innerHeight,
+      camera: Math.round(document.querySelector('#camera').getBoundingClientRect().height),
+      status: Math.round(document.querySelector('#scan-status').getBoundingClientRect().bottom),
+    }));
+    t.check(`Scan at ${w}x${hh}: camera fills the screen, nothing to scroll`, scan.scroll === 0 && scan.camera > hh - 300 && scan.status <= hh, JSON.stringify(scan));
+  }
+}
+
+// ---- camera overlays never cover the card guide (name at its top, number at its bottom) ----
+{
+  const PHONES = [[390, 664], [393, 659], [375, 548], [430, 739], [360, 660], [360, 740], [412, 800], [390, 844]];
+  const hits = () =>
+    page.evaluate(() => {
+      const box = (s) => {
+        const n = document.querySelector(s);
+        return n && n.getClientRects().length && getComputedStyle(n).display !== 'none' ? n.getBoundingClientRect() : null;
+      };
+      const meet = (a, b) => !!(a && b && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom);
+      const [guide, chip, banner, hint] = ['#guide', '#btn-mode', '#scan-target', '.guide-hint'].map(box);
+      const bad = [];
+      if (meet(chip, guide)) bad.push('chip/guide');
+      if (meet(chip, hint)) bad.push('chip/hint');
+      if (meet(banner, guide)) bad.push('banner/guide');
+      if (meet(banner, hint)) bad.push('banner/hint');
+      return { bad, guide: Math.round(guide.height), banner: !!banner };
+    });
+  const sweep = async () => {
+    const out = {};
+    for (const [w, hh] of PHONES) {
+      await page.setViewportSize({ width: w, height: hh });
+      out[`${w}x${hh}`] = await hits();
+    }
+    return out;
+  };
+  await page.click('.tab[data-view="scan"]');
+  await page.click('#btn-mode'); // Batch mode: On · n saved
+  const batch = await sweep();
+  await page.click('#btn-mode');
+  await page.click('.tab[data-view="trade"]');
+  await page.click('#trade-give button:has-text("Scan")');
+  await page.waitForSelector('#scan-target:not([hidden])');
+  const trade = await sweep();
+  await page.click('#btn-target-done');
+  const ok = (r) => Object.values(r).every((v) => !v.bad.length && v.guide >= 180);
+  t.check('batch-mode chip covers neither the guide nor its hint', ok(batch), JSON.stringify(batch));
+  t.check('the trade banner does not cover the guide', ok(trade) && Object.values(trade).every((v) => v.banner), JSON.stringify(trade));
+  t.check('the guide keeps its full size on a tall screen', batch['390x844'].guide >= 476 && trade['390x844'].guide >= 476, `${batch['390x844'].guide} / ${trade['390x844'].guide}`);
+  await page.setViewportSize({ width: 390, height: 844 });
+}
 
 const errors = h.errors();
 t.check('no page errors', !errors.length, errors.join('\n'));

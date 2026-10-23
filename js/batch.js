@@ -3,18 +3,21 @@
 // Public API (used by app.js):
 //   initBatch()                 once at start-up (loads the saved batch, then emits 'batch:changed')
 //   renderBatch()               draw #view-batch
-//   enqueueCanvas(canvas)       save a cropped camera frame; resolves to the number saved (0 or 1)
-//   enqueueFiles(files)         save picked photos; resolves to the number saved
+//   enqueueCanvas(canvas, opts) save a cropped camera frame; resolves to the number saved (0 or 1)
+//   enqueueFiles(files, opts)   save picked photos and toast how it went; resolves to the number saved
+//                               opts: { tradeSide: 'give' | 'get' } marks the photos as cards for that side
 //   batchCount()                photos not identified yet (sync)
 // Emits 'batch:changed' when the batch changes.
 //
 // Saved item: { id, added, source: 'camera'|'photo', status, entry, alts, clues, debug, conf,
-//               check, reviewed, saved, versions, error }
-//   status  - 'waiting' | 'processing' | 'matched' | 'nomatch' | 'error'
-//   entry   - entry.makeEntry() of the chosen card + version
-//   alts    - [{ id, score }] ranked matches (top first) so the review sheet works after a restart
-//   check   - low/medium confidence; cleared once the user reviews the item
-import { $, el, emit, on, toast, confirmDialog, navigate } from './ui.js';
+//               check, reviewed, saved, traded, forTrade, versions, error }
+//   status   - 'waiting' | 'processing' | 'matched' | 'nomatch' | 'error'
+//   entry    - entry.makeEntry() of the chosen card + version
+//   alts     - [{ id, score }] ranked matches (top first) so the review sheet works after a restart
+//   check    - low/medium confidence; cleared once the user reviews the item
+//   saved    - added to the collection; traded - side it was sent to ('give' | 'get')
+//   forTrade - side it was photographed for (Scan in "Adding cards to" mode), until it is sent
+import { $, el, emit, on, toast, actionToast, confirmDialog, navigate } from './ui.js';
 import { kvGet, getCard } from './api.js';
 import { fileToCanvas } from './ocr.js';
 import { identify } from './identify.js';
@@ -26,6 +29,7 @@ import { makeEntry, entryKey, entryThumb, entryNumber, unitUsd, totalUsd } from 
 import { cardImg } from './components.js';
 import { showResults, openCard } from './sheet.js';
 import { addToCollection } from './collection.js';
+import { inTrade } from './trade.js';
 
 const INDEX = 'batch:items';
 const photoKey = (id) => `batch:photo:${id}`;
@@ -33,17 +37,21 @@ const thumbKey = (id) => `batch:thumb:${id}`;
 const MAX_SIDE = 3000; // whole photos are downscaled to this; camera crops are kept as-is
 const THUMB_SIDE = 320;
 const ALTS = 13; // best match + the 12 alternates the sheet shows
+const SIDES = { give: 'You give', get: 'You get' };
 
 let items = [];
 let loaded = false;
 let loadP = Promise.resolve();
 const thumbs = new Map(); // item id -> object URL of its thumbnail
 const run = { active: false, stop: false, index: 0, total: 0, msg: '' };
-let reviewing = null; // item id while its review sheet is open
+let reviewing = null; // { id } while that item's review sheet is open; also the sheet's owner token
+let gen = 0; // bumped by Clear all, so saves and undos started before it are dropped
 
 const isPending = (it) => it.status === 'waiting' || it.status === 'error';
 const needsCheck = (it) => it.status === 'nomatch' || (it.status === 'matched' && it.check && !it.reviewed);
 const find = (id) => items.find((i) => i.id === id);
+// Sent to the trade and still there (the trade may have been cleared since).
+const isTraded = (it) => !!it.traded && !!it.entry && inTrade(entryKey(it.entry));
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 export function batchCount() {
@@ -63,14 +71,16 @@ export function initBatch() {
       loaded = true;
       changed();
       render();
+      dropOrphans();
     });
   on('sheet:closed', () => (reviewing = null));
-  on('card:action', ({ action, entry }) => {
-    // "Add to collection" tapped in a review sheet: remember it so "Add all" won't add it twice.
-    const it = reviewing && action === 'collection' && entry && find(reviewing);
+  on('card:action', ({ action, entry, owner }) => {
+    // A button in this item's own review sheet: remember it so the bulk buttons don't repeat it.
+    const it = owner && owner === reviewing && entry && find(owner.id);
     if (!it) return;
     setChoice(it, entry);
-    it.saved = true;
+    if (action === 'collection') it.saved = true;
+    else markTraded(it, action === 'trade-give' ? 'give' : 'get');
     persist();
     render();
   });
@@ -142,6 +152,22 @@ function persist() {
   return indexQueued;
 }
 
+/** Delete photos no item points to (the app closed while a deleted photo could still be undone). */
+function dropOrphans() {
+  const keep = new Set(items.map((i) => i.id));
+  return queued(() =>
+    tx((s) => {
+      const req = s.getAllKeys(IDBKeyRange.bound('batch:photo:', 'batch:thumb:\uffff'));
+      req.onsuccess = () => {
+        for (const k of req.result) {
+          const m = /^batch:(?:photo|thumb):(.+)$/.exec(k);
+          if (m && !keep.has(m[1])) s.delete(k);
+        }
+      };
+    }),
+  ).catch(() => {});
+}
+
 let alerting = false;
 function saveFailed(e) {
   console.warn(e);
@@ -184,25 +210,34 @@ function thumbnail(canvas) {
   return jpeg(c, 0.8).finally(() => release(c));
 }
 
-async function addPhoto(canvas, source) {
+/** Save one photo; resolves false if Clear all ran since generation g (nothing is kept then). */
+async function addPhoto(canvas, source, forTrade, g = gen) {
   const [blob, thumb] = await Promise.all([jpeg(canvas, 0.9), thumbnail(canvas)]);
   await loadP;
   const it = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, added: Date.now(), source, status: 'waiting' };
+  if (forTrade) it.forTrade = forTrade;
+  let kept = false;
   await queued(async () => {
+    if (g !== gen) return;
     await tx((s) => {
       s.put(blob, photoKey(it.id));
       s.put(thumb, thumbKey(it.id));
       s.put([...items, it], INDEX);
     });
+    // Cleared while writing: Clear all's delete, queued behind this write, removes it again.
+    if (g !== gen) return;
     items.push(it);
+    kept = true;
   });
+  if (!kept) return false;
   changed();
   render();
+  return true;
 }
 
-export async function enqueueCanvas(canvas) {
+export async function enqueueCanvas(canvas, { tradeSide = null } = {}) {
   try {
-    await addPhoto(canvas, 'camera');
+    if (!(await addPhoto(canvas, 'camera', tradeSide))) return 0;
     askPersistence();
     return 1;
   } catch (e) {
@@ -213,13 +248,15 @@ export async function enqueueCanvas(canvas) {
   }
 }
 
-export async function enqueueFiles(files) {
+export async function enqueueFiles(files, { tradeSide = null } = {}) {
   const list = [...files];
   const pill = list.length > 1 ? el('div', { class: 'toast b-saving', role: 'status' }) : null;
   if (pill) document.body.append(pill);
+  const g = gen;
   let added = 0;
   let unreadable = 0;
   for (const [i, f] of list.entries()) {
+    if (g !== gen) break; // Clear all: stop saving the rest
     if (pill) pill.textContent = `Saving photo ${i + 1} of ${list.length}…`;
     let canvas;
     try {
@@ -229,8 +266,7 @@ export async function enqueueFiles(files) {
       continue;
     }
     try {
-      await addPhoto(canvas, 'photo');
-      added++;
+      if (await addPhoto(canvas, 'photo', tradeSide, g)) added++;
     } catch (e) {
       saveFailed(e);
       break; // storage is full: the rest would fail too
@@ -239,7 +275,13 @@ export async function enqueueFiles(files) {
     }
   }
   pill?.remove();
-  if (unreadable) toast(`${plural(unreadable, 'photo')} couldn't be opened`, 3000);
+  if (g !== gen) return 0; // cleared: the photos saved so far are gone too
+  // One message, so the warning isn't replaced by the count.
+  const msg = [
+    added && `${plural(added, 'photo')} added to batch${tradeSide ? ` for “${SIDES[tradeSide]}”` : ''}`,
+    unreadable && `${plural(unreadable, 'photo')} couldn't be opened`,
+  ].filter(Boolean);
+  if (msg.length) toast(msg.join(' · '), unreadable ? 4500 : 2200);
   if (added) askPersistence();
   return added;
 }
@@ -259,6 +301,41 @@ async function removeItems(ids) {
       s.put(items, INDEX);
     }),
   ).catch(saveFailed);
+}
+
+/** ✕ on a row (or Delete on the photo): gone at once, but the photo is kept until Undo has expired. */
+const removing = new Map(); // item id -> token of its latest removal that can still be undone
+function removeOne(id) {
+  const it = find(id);
+  if (!it) return;
+  const at = items.indexOf(it);
+  const g = gen;
+  const token = {};
+  removing.set(id, token);
+  items = items.filter((i) => i !== it);
+  changed();
+  render();
+  persist();
+  const undo = () => {
+    if (g !== gen || removing.get(id) !== token) return;
+    removing.delete(id);
+    items.splice(Math.min(at, items.length), 0, it);
+    changed();
+    render();
+    persist();
+  };
+  const purge = () => {
+    if (removing.get(id) !== token) return; // undone, or removed again since
+    removing.delete(id);
+    forgetThumb(id);
+    queued(() =>
+      tx((s) => {
+        s.delete(photoKey(id));
+        s.delete(thumbKey(id));
+      }),
+    ).catch(saveFailed);
+  };
+  actionToast(`Deleted photo ${at + 1}`, 'Undo', undo, { ms: 5000, onEnd: purge });
 }
 
 // ---------------- processing ----------------
@@ -415,18 +492,20 @@ async function review(it) {
     /* offline without a card list: fall back to the saved card below */
   }
   const ranked = rankedFor(it);
+  const owner = { id: it.id };
   const opts = {
+    owner,
     onPick: (card, row) => pick(it.id, card, row),
     pickLabel: 'Use this card',
     preferred: it.entry?.variantId || it.entry?.variant || undefined,
   };
-  reviewing = it.id;
+  reviewing = owner;
   if (!ranked.length && it.entry) openCard(it.entry.id, opts);
   else showResults(ranked, it.clues || null, it.debug || null, opts);
 }
 
 function setChoice(it, entry, versions) {
-  if (!it.entry || entryKey(it.entry) !== entryKey(entry)) it.saved = false;
+  if (!it.entry || entryKey(it.entry) !== entryKey(entry)) Object.assign(it, { saved: false, traded: null });
   Object.assign(it, { entry, status: 'matched', reviewed: true, check: false, error: null });
   if (versions) it.versions = versions;
 }
@@ -469,18 +548,72 @@ async function addAllToCollection() {
   toast(`Added ${plural(list.length, 'card')} to your collection`);
 }
 
+function markTraded(it, side) {
+  it.traded = side;
+  delete it.forTrade;
+}
+
+function sendList(list, side) {
+  // Entry-only payload: trade.js reads `entry` (card/row are null for batch results).
+  for (const it of list) {
+    emit('card:action', { action: `trade-${side}`, card: null, row: null, entry: { ...it.entry } });
+    markTraded(it, side);
+  }
+  persist();
+  render();
+}
+
+const checkNote = (list) => {
+  const n = list.filter(needsCheck).length;
+  return n ? ` ${n === 1 ? '1 of them is' : `${n} of them are`} marked “Check” and may be the wrong card or version.` : '';
+};
+
+/** Cards already in the trade are left out; sending them again has to be asked for. */
 async function sendToTrade() {
-  const list = items.filter((i) => i.status === 'matched' && i.entry);
-  if (!list.length) return;
-  const side = await dialog(`Add ${list.length === 1 ? 'the identified card' : `all ${list.length} identified cards`} to the trade as:`, [
+  const matched = items.filter((i) => i.status === 'matched' && i.entry);
+  if (!matched.length) return;
+  const fresh = matched.filter((i) => !isTraded(i));
+  const inAlready = matched.length - fresh.length;
+  const again = !fresh.length;
+  const list = again ? matched : fresh;
+  const msg = again
+    ? `${matched.length === 1 ? 'This card is' : `All ${matched.length} cards are`} already in the trade. Add ${matched.length === 1 ? 'it' : 'them'} again as another copy?`
+    : inAlready
+      ? `Add ${plural(fresh.length, 'new card')} to the trade as: (${inAlready} already in the trade ${inAlready === 1 ? 'is' : 'are'} left out)`
+      : `Add ${list.length === 1 ? 'the identified card' : `all ${list.length} identified cards`} to the trade as:`;
+  const side = await dialog(msg + checkNote(list), [
     { label: 'Cancel', value: null },
-    { label: 'You give', value: 'give', primary: true },
-    { label: 'You get', value: 'get', primary: true },
+    { label: again ? 'Again: You give' : 'You give', value: 'give', primary: true },
+    { label: again ? 'Again: You get' : 'You get', value: 'get', primary: true },
   ]);
   if (!side) return;
-  // Entry-only payload: trade.js reads `entry` (card/row are null for batch results).
-  for (const it of list) emit('card:action', { action: `trade-${side}`, card: null, row: null, entry: { ...it.entry } });
-  toast(`${plural(list.length, 'card')} added to “${side === 'give' ? 'You give' : 'You get'}”`);
+  sendList(list, side);
+  const to = `“${SIDES[side]}”`;
+  toast(
+    again
+      ? `${plural(list.length, 'card')} added to ${to} again`
+      : inAlready
+        ? `Sent ${plural(fresh.length, 'new card')} to ${to}; ${inAlready} ${inAlready === 1 ? 'was' : 'were'} already in the trade`
+        : `${plural(list.length, 'card')} added to ${to}`,
+    3500,
+  );
+  navigate('trade');
+}
+
+/** The cards photographed for one side of the trade (Scan in "Adding cards to" mode). */
+async function sendForTrade(side) {
+  const list = items.filter((i) => i.forTrade === side && i.status === 'matched' && i.entry);
+  if (!list.length) return;
+  const unsure = list.filter(needsCheck).length;
+  if (unsure) {
+    const ok = await confirmDialog(
+      `${unsure === 1 ? '1 card is' : `${unsure} cards are`} marked “Check” and may be the wrong card or version. Add all ${list.length} to “${SIDES[side]}” anyway?`,
+      'Add all',
+    );
+    if (!ok) return;
+  }
+  sendList(list, side);
+  toast(`${plural(list.length, 'card')} added to “${SIDES[side]}”`);
   navigate('trade');
 }
 
@@ -504,6 +637,8 @@ async function clearAll() {
   const ok = await confirmDialog(`Delete all ${plural(items.length, 'photo')} in this batch? Cards already in your collection stay there.`, 'Delete all');
   if (!ok) return;
   run.stop = true;
+  gen++; // photos still being saved, and undos, are dropped
+  removing.clear();
   items.forEach((i) => forgetThumb(i.id));
   items = [];
   changed();
@@ -564,7 +699,7 @@ async function viewPhoto(id) {
   if (!items.includes(it)) return;
   if (choice === 'process') processAll(it);
   if (choice === 'review') review(it);
-  if (choice === 'delete') removeItems([id]);
+  if (choice === 'delete') removeOne(id);
 }
 
 // ---------------- view ----------------
@@ -594,13 +729,14 @@ function thumbImg(it) {
 }
 
 function counts() {
-  const c = { pending: 0, waiting: 0, matched: 0, unsaved: 0, check: 0 };
+  const c = { pending: 0, waiting: 0, matched: 0, unsaved: 0, untraded: 0, check: 0 };
   for (const it of items) {
     if (isPending(it)) c.pending++;
     if (isPending(it) || it.status === 'processing') c.waiting++;
     if (it.status === 'matched') {
       c.matched++;
       if (!it.saved) c.unsaved++;
+      if (!isTraded(it)) c.untraded++;
     }
     if (needsCheck(it)) c.check++;
   }
@@ -620,9 +756,7 @@ function addPhotosButton(label, cls = 'btn') {
       onchange: async (e) => {
         const files = [...(e.target.files || [])];
         e.target.value = '';
-        if (!files.length) return;
-        const n = await enqueueFiles(files);
-        if (n) toast(`${plural(n, 'photo')} added to batch`);
+        if (files.length) await enqueueFiles(files);
       },
     });
   }
@@ -724,8 +858,29 @@ function bulkActions(c) {
       { class: 'btn', id: 'batch-add-all', type: 'button', disabled: !c.unsaved, onclick: addAllToCollection },
       c.unsaved ? `Add ${c.unsaved} to collection` : 'All in collection ✓',
     ),
-    el('button', { class: 'btn', id: 'batch-trade', type: 'button', onclick: sendToTrade }, 'Send to trade…'),
+    el('button', { class: 'btn', id: 'batch-trade', type: 'button', onclick: sendToTrade }, c.untraded && c.untraded < c.matched ? `Send ${c.untraded} new to trade…` : 'Send to trade…'),
   );
+}
+
+/** Photos taken for one side of the trade: one button sends just those. */
+function tradeNotes() {
+  return Object.keys(SIDES).map((side) => {
+    const list = items.filter((i) => i.forTrade === side);
+    if (!list.length) return null;
+    const ready = list.filter((i) => i.status === 'matched' && i.entry).length;
+    const left = list.length - ready;
+    return el(
+      'div',
+      { class: `b-trade-note ${side}` },
+      el(
+        'span',
+        {},
+        el('b', {}, `${plural(list.length, 'photo')} for “${SIDES[side]}”`),
+        left ? el('span', { class: 'muted small' }, ` · ${left} not identified yet`) : null,
+      ),
+      ready ? el('button', { class: 'btn small primary', id: `batch-send-${side}`, type: 'button', onclick: () => sendForTrade(side) }, `Send ${ready} to ${SIDES[side]}`) : null,
+    );
+  });
 }
 
 function describe(it) {
@@ -736,6 +891,7 @@ function describe(it) {
     { class: 'b-tags' },
     needsCheck(it) ? el('span', { class: 'b-tag check' }, 'Check') : null,
     it.saved ? el('span', { class: 'b-tag saved' }, 'In collection') : null,
+    isTraded(it) ? el('span', { class: 'b-tag traded' }, `In trade · ${SIDES[it.traded]}`) : null,
   );
   const e = it.entry;
   switch (it.status) {
@@ -777,7 +933,7 @@ function row(it, n) {
       'span',
       { class: 'b-right' },
       it.status === 'matched' ? el('span', { class: 'b-price' }, unit != null ? formatMoney(unit) : 'No price') : null,
-      it.status === 'processing' ? null : el('button', { class: 'b-remove', type: 'button', 'aria-label': `Delete photo ${n}`, onclick: () => removeItems([it.id]) }, '✕'),
+      it.status === 'processing' ? null : el('button', { class: 'b-remove', type: 'button', 'aria-label': `Delete photo ${n}`, onclick: () => removeOne(it.id) }, '✕'),
     ),
   );
 }
@@ -796,6 +952,7 @@ export function renderBatch() {
   const parts = [
     stats(c),
     runBox(c),
+    ...tradeNotes(),
     bulkActions(c),
     el('ol', { class: 'b-list', id: 'batch-list' }, items.map((it, i) => row(it, i + 1))),
     el(

@@ -418,7 +418,8 @@ function intersect(a, b) {
 /**
  * Card-shaped quadrilaterals in an RGBA image, best first:
  * [{ corners: [TL, TR, BR, BL], score, support, aspectError, area, landscape }].
- * Coordinates are in `img` pixels.
+ * The first may carry `whole` and `upsideDown` outlines (see detectCard). Coordinates
+ * are in `img` pixels.
  */
 export function findCardQuads(img, opts = {}) {
   const o = { ...DEFAULTS, ...opts };
@@ -470,8 +471,49 @@ export function findCardQuads(img, opts = {}) {
   quads.splice(0, top.length, ...top);
   const pick = preferCard(quads, img, em, o.trace);
   const ordered = [pick, ...quads.filter((q) => q !== pick)];
-  ordered[0] = refineQuad(em, pushOut(ordered[0], lines, covs, img, em, o.trace));
+  const whole = wholeCard(pick, quads);
+  ordered[0] = refineQuad(em, pushOut(pick, lines, covs, img, em, o.trace));
+  // The same outline fitted for a card lying upside down (name area at the bottom).
+  if (!pick.landscape) ordered[0].upsideDown = refineQuad(em, pushOut(pick, lines, covs, img, em, null, 2));
+  if (whole) {
+    ordered[0].whole = refineQuad(em, pushOut(whole, lines, covs, img, em, o.trace));
+    o.trace?.push(`may be half of ${whole.corners.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join(' ')} (score ${whole.score.toFixed(2)})`);
+  }
   return ordered;
+}
+
+/**
+ * A card lying sideways has the edge of its artwork across its middle, which cuts it
+ * into two halves that are each upright and card-shaped. Such a half (the card's two
+ * long edges, one end and the artwork's edge) outscores the sideways card itself, as
+ * upright cards are preferred. The quad of the other orientation that `half` is half
+ * of: twice its size, with all of the half's corners on its outline. Two upright cards
+ * side by side look the same, so only OCR can tell which it is.
+ */
+function wholeCard(half, quads) {
+  const s = quadSize(half.corners);
+  const tol = 0.1 * Math.min(s.w, s.h); // the half may run along the card's inner frame
+  const fits = quads.filter((q) => {
+    if (q.landscape === half.landscape || q.score < half.score * 0.4) return false;
+    const r = half.area / q.area;
+    return r > 0.35 && r < 0.65 && half.corners.every((p) => insideQuad(q.corners, p, tol) && distToOutline(q.corners, p) <= tol);
+  });
+  if (!fits.length) return null;
+  // Of outlines scoring about the same, the outermost: the card's edge, not its inner frame.
+  const top = Math.max(...fits.map((q) => q.score));
+  return fits.filter((q) => q.score >= top * 0.9).sort((a, b) => b.area - a.area)[0];
+}
+
+function distToOutline(c, p) {
+  let d = Infinity;
+  for (let k = 0; k < 4; k++) {
+    const a = c[k];
+    const b = c[(k + 1) % 4];
+    const len2 = (b.x - a.x) ** 2 + (b.y - a.y) ** 2 || 1;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / len2));
+    d = Math.min(d, Math.hypot(p.x - a.x - t * (b.x - a.x), p.y - a.y - t * (b.y - a.y)));
+  }
+  return d;
 }
 
 /**
@@ -735,9 +777,10 @@ function sideBand(img, em, o0, o1, i0, i1) {
  * Move each side out to a parallel line just beyond it when the strip in between is
  * part of the card: the inner frame, the name bar or the artwork's top often make a
  * stronger line than the card's own edge (more so with a sticker or glare on it).
- * A side may move up to 8% of the card, the top 13% (the name area is tall).
+ * A side may move up to 8% of the card, the top 13% (the name area is tall); `top`
+ * is the side (0 or 2) taken as the card's top.
  */
-function pushOut(quad, lines, covs, img, em, trace) {
+function pushOut(quad, lines, covs, img, em, trace, top = 0) {
   const ids = [...quad.ids];
   const L = (k) => lines[ids[(k + 4) % 4]];
   const corner = (k) => intersect(L(k - 1), L(k));
@@ -748,7 +791,7 @@ function pushOut(quad, lines, covs, img, em, trace) {
   });
   const size = quadSize(quad.corners);
   for (let k = 0; k < 4; k++) {
-    const budget = k % 2 ? 0.08 * size.w : (k ? 0.08 : 0.13) * size.h;
+    const budget = k % 2 ? 0.08 * size.w : (k === top ? 0.13 : 0.08) * size.h;
     let moved = 0;
     for (let step = 0; step < 4; step++) {
       const cur = L(k);
@@ -877,7 +920,11 @@ function makeCanvas(w, h) {
 /**
  * Find the card in a canvas. Returns null when there is no confident card, else
  * { corners: [TL, TR, BR, BL] in canvas pixels, score, area (fraction of the photo),
- *   landscape (card lies sideways), candidates: [corners, …] (next-best guesses), ms }.
+ *   landscape (card lies sideways), candidates: [corners, …] (next-best guesses),
+ *   whole: corners of a card of the other orientation that `corners` may be just half
+ *   of (a sideways card split by the edge of its artwork), or null,
+ *   upsideDown: for an upright outline, the same outline fitted for a card that is upside
+ *   down (labelled like `corners`; turn it with rotateCorners(c, 2) to read it), ms }.
  */
 export function detectCard(canvas, opts = {}) {
   const o = { ...DEFAULTS, ...opts };
@@ -902,6 +949,8 @@ export function detectCard(canvas, opts = {}) {
     area: best.area,
     landscape: best.landscape,
     candidates: distinctOutlines(quads).slice(1, 4).map((q) => up(q.corners)),
+    whole: best.whole ? up(best.whole.corners) : null,
+    upsideDown: best.upsideDown ? up(best.upsideDown.corners) : null,
     ms,
   };
 }

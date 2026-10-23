@@ -2,8 +2,11 @@
 // Public API (used by app.js):
 //   initTrade()    once at start-up; listens for 'card:action' trade-give / trade-get
 //   renderTrade()  draw #view-trade
-// The current trade is kept on the device in localStorage ('trade.v1').
+// The current trade is kept on the device in localStorage ('trade.v1'). Lines are saved
+// entries (see entry.js) plus pricedAt: when the card data their price comes from was
+// downloaded (ms). Collection and Batch entries don't have it; their price may be months old.
 import { $, el, on, toast, confirmDialog, navigate } from './ui.js';
+import { getCard, cardFetchedAt } from './api.js';
 import { formatMoney } from './prices.js';
 import { makeEntry, entryKey, refreshEntry, unitUsd, totalUsd, entryNumber } from './entry.js';
 import { entryRow } from './components.js';
@@ -17,6 +20,7 @@ const OTHER = { give: 'get', get: 'give' };
 let trade = load();
 let editing = null; // { side, key } while the sheet is open on one of the trade's cards
 let refreshing = ''; // progress label while prices refresh
+let pendingUndo = null; // { side, line, i, toast } while "Removed … Undo" is showing
 
 // ---------------- maths ----------------
 
@@ -25,7 +29,8 @@ const cardsLabel = (n) => `${n} card${n === 1 ? '' : 's'}`;
 const fmtPct = (p) => `${p < 10 ? p.toFixed(1) : Math.round(p)}%`;
 
 /**
- * Totals and verdict. Cards without a price count as $0.
+ * Totals and verdict. Cards without a price count as $0, but a side where no card
+ * has a price can't be judged ('unknown').
  * Returns { give, get: { usd, cards, unpriced }, diff (get − give, USD), pct (of the bigger side), unpriced, verdict: { kind, text } }
  *   kind: 'empty' | 'unknown' | 'fair' | 'ahead' | 'behind'
  */
@@ -41,15 +46,22 @@ export function evaluateTrade({ give = [], get = [] } = {}) {
   const bigC = Math.max(cents(g.usd), cents(r.usd));
   const pct = bigC ? (Math.abs(diffC) / bigC) * 100 : 0;
   const diff = diffC / 100;
+  const blind = g.unpriced === g.cards ? 'give' : r.unpriced === r.cards ? 'get' : null; // no card on that side has a price
   let verdict;
   if (!g.cards && !r.cards) verdict = { kind: 'empty', text: "Add the cards you'd give and get to see if it's fair." };
   else if (!g.cards) verdict = { kind: 'empty', text: 'Now add the cards you give.' };
   else if (!r.cards) verdict = { kind: 'empty', text: 'Now add the cards you get.' };
   else if (!bigC) verdict = { kind: 'unknown', text: 'No prices to compare — check eBay sold listings.' };
+  else if (blind) verdict = { kind: 'unknown', text: unpricedSide(blind, blind === 'give' ? g.cards : r.cards) };
   else if (Math.abs(diffC) * 20 <= bigC) verdict = { kind: 'fair', text: 'Fair trade (within 5%)' };
   else if (diffC > 0) verdict = { kind: 'ahead', text: `You come out ahead by ${formatMoney(diff)}` };
   else verdict = { kind: 'behind', text: `You'd lose ${formatMoney(-diff)}` };
   return { give: g, get: r, diff, pct, unpriced: g.unpriced + r.unpriced, verdict };
+}
+
+function unpricedSide(side, n) {
+  const what = n === 1 ? `the card you ${side} has no price` : `none of the ${n} cards you ${side} have a price`;
+  return `Can't judge: ${what} — check eBay sold listings.`;
 }
 
 // ---------------- storage ----------------
@@ -75,21 +87,44 @@ function commit() {
 
 // ---------------- changes ----------------
 
+/** An entry priced from the card data the sheet just loaded. */
+const fromSheet = (card, row, entry) => ({ ...(entry || makeEntry(card, row)), pricedAt: cardFetchedAt(card.id) || Date.now() });
+
 function clean(e) {
   const { key, ...rest } = e; // collection rows carry a cached key
   return { ...rest, qty: e.qty || 1, added: Date.now() };
 }
 
+/** Another copy of a line's card: add the quantity; its price replaces the line's only if known to be newer. */
+function merge(line, e) {
+  line.qty = (line.qty || 1) + (e.qty || 1);
+  if (e.price && (!line.price || (e.pricedAt && e.pricedAt >= (line.pricedAt || 0)))) {
+    line.price = e.price;
+    line.pricedAt = e.pricedAt;
+  }
+}
+
 /** Add to a side; the same card in the same version just bumps the quantity. */
 function addEntry(side, e) {
   const same = trade[side].find((x) => entryKey(x) === entryKey(e));
-  if (same) {
-    same.qty = (same.qty || 1) + (e.qty || 1);
-    same.price = e.price || same.price;
-  } else {
-    trade[side].push(clean(e));
-  }
+  if (same) merge(same, e);
+  else trade[side].push(clean(e));
   commit();
+}
+
+/** A line added from saved data (collection, batch) may carry an old price: look up today's. */
+async function freshen(e) {
+  const fresh = await refreshEntry(e);
+  const at = cardFetchedAt(e.id);
+  if (fresh.price === e.price || !at) return; // offline, or no newer price for this version
+  let changed = false;
+  for (const line of [...trade.give, ...trade.get]) {
+    if (entryKey(line) !== entryKey(e) || (line.pricedAt || 0) > at) continue; // a Refresh finished first
+    line.price = fresh.price;
+    line.pricedAt = at;
+    changed = true;
+  }
+  if (changed) commit();
 }
 
 /** Swap one line for another version of the card, keeping its place and quantity. */
@@ -100,8 +135,7 @@ function replaceLine(side, key, e) {
   const next = { ...clean(e), qty: list[i].qty || 1 };
   const dup = list.findIndex((x, j) => j !== i && entryKey(x) === entryKey(next));
   if (dup >= 0) {
-    list[dup].qty = (list[dup].qty || 1) + next.qty;
-    list[dup].price = next.price || list[dup].price;
+    merge(list[dup], next);
     list.splice(i, 1);
   } else {
     list[i] = next;
@@ -121,12 +155,31 @@ function changeQty(side, e, delta) {
   }
   const [removed] = list.splice(i, 1);
   commit();
-  undoToast(`Removed ${removed.name}`, () => {
-    const same = trade[side].find((x) => entryKey(x) === entryKey(removed));
-    if (same) same.qty = (same.qty || 1) + (removed.qty || 1);
-    else trade[side].splice(Math.min(i, trade[side].length), 0, removed);
+  offerUndo(side, removed, i);
+}
+
+/** "Removed X · Undo" for 5 s. Swap sides moves the pending undo along; Clear trade or a newer removal drops it. */
+function offerUndo(side, line, i) {
+  dropUndo();
+  const u = { side, line, i };
+  const onclick = () => {
+    if (pendingUndo !== u) return;
+    dropUndo();
+    const list = trade[u.side];
+    const same = list.find((x) => entryKey(x) === entryKey(line));
+    if (same) merge(same, line);
+    else list.splice(Math.min(i, list.length), 0, line);
     commit();
-  });
+  };
+  u.toast = el('div', { class: 'toast trade-undo', role: 'status' }, el('span', {}, `Removed ${line.name}`), el('button', { type: 'button', onclick }, 'Undo'));
+  pendingUndo = u;
+  document.body.append(u.toast);
+  setTimeout(() => pendingUndo === u && dropUndo(), 5000);
+}
+
+function dropUndo() {
+  pendingUndo?.toast.remove();
+  pendingUndo = null;
 }
 
 /** Tap on a trade card: open its sheet; "Use this version" (or the same side's trade button) changes the line. */
@@ -134,10 +187,11 @@ function openLine(side, e) {
   const key = entryKey(e);
   editing = { side, key };
   openCard(e.id, {
+    owner: editing,
     preferred: e.variantId || e.variant,
     pickLabel: 'Use this version',
     onPick: (card, row) => {
-      const next = makeEntry(card, row);
+      const next = fromSheet(card, row);
       if (entryKey(next) === key) return;
       replaceLine(side, key, next);
       toast(`Changed to ${next.variant || 'that version'}`);
@@ -146,24 +200,28 @@ function openLine(side, e) {
 }
 
 function onCardAction(detail) {
-  const { action, card, row, entry } = detail;
+  const { action, card, row, entry, owner } = detail;
   const side = { 'trade-give': 'give', 'trade-get': 'get' }[action];
   if (!side) return;
   // Batch results send only `entry`; the sheet sends card + row too.
-  const e = entry || (card ? makeEntry(card, row) : null);
+  const e = card ? fromSheet(card, row, entry) : entry;
   if (!e?.id) return;
-  const ed = editing;
+  const ed = editing && owner === editing ? editing : null; // only the trade line's own sheet edits it
   const line = ed && trade[ed.side].find((x) => entryKey(x) === ed.key);
   if (line && ed.side === side && line.id === e.id && entryKey(e) !== ed.key) {
     replaceLine(side, ed.key, e);
     detail.toast = `Changed to ${e.variant || 'that version'}`;
-  } else addEntry(side, e);
+  } else {
+    addEntry(side, e);
+    if (!card) freshen(e); // the Batch tab priced it when the photo was processed
+  }
   // Opened from a trade line: go straight back to the updated trade.
   if (ed) closeSheet();
 }
 
 function swapSides() {
   trade = { give: trade.get, get: trade.give };
+  if (pendingUndo) pendingUndo.side = OTHER[pendingUndo.side]; // the removed card belongs with its old list
   commit();
   toast('Sides swapped');
 }
@@ -172,24 +230,40 @@ async function clearTrade() {
   if (!trade.give.length && !trade.get.length) return;
   if (!(await confirmDialog('Remove every card from this trade?', 'Clear trade'))) return;
   trade = { give: [], get: [] };
+  dropUndo();
   commit();
 }
 
+/** Download every card in the trade again (once per card) and re-price its lines. */
 async function refreshPrices() {
-  const all = [...trade.give.map((e) => ['give', e]), ...trade.get.map((e) => ['get', e])];
-  if (!all.length || refreshing) return;
-  for (const [n, [side, e]] of all.entries()) {
-    refreshing = `Refreshing ${n + 1}/${all.length}…`;
+  const ids = [...new Set([...trade.give, ...trade.get].map((e) => e.id))];
+  if (!ids.length || refreshing) return;
+  const started = Date.now();
+  let fetched = 0;
+  for (const [n, id] of ids.entries()) {
+    refreshing = `Refreshing ${n + 1}/${ids.length}…`;
     const btn = $('#trade-refresh');
     if (btn) btn.textContent = refreshing;
-    const fresh = await refreshEntry(e);
-    // The trade may have changed meanwhile (swap, qty): update by key.
-    const line = trade[side].find((x) => entryKey(x) === entryKey(e));
-    if (line) line.price = fresh.price;
+    await getCard(id, { fresh: true }).catch(() => null);
+    if (cardFetchedAt(id) >= started) fetched++;
+  }
+  // The trade may have changed meanwhile (swap, qty, adds): go through the lines as they are now.
+  for (const line of [...trade.give, ...trade.get]) {
+    const at = cardFetchedAt(line.id);
+    if (at < started) continue; // not downloaded: keep its price
+    line.price = (await refreshEntry(line)).price;
+    line.pricedAt = at;
   }
   refreshing = '';
   commit();
-  toast('Prices updated');
+  if (fetched === ids.length) toast('Prices updated');
+  else if (fetched) toast(`Updated ${fetched} of ${cardsLabel(ids.length)} — couldn't reach the price server for the rest`, 4000);
+  else toast("Couldn't reach the price server — prices not updated", 4000);
+}
+
+/** Is this card + version (entryKey) on either side of the current trade? */
+export function inTrade(key) {
+  return trade.give.some((x) => entryKey(x) === key) || trade.get.some((x) => entryKey(x) === key);
 }
 
 // ---------------- share ----------------
@@ -265,7 +339,9 @@ function pickFromCollection(side) {
       ...shown.map((i) => {
         const k = entryKey(i);
         const add = () => {
-          addEntry(side, { ...i, qty: 1 });
+          const e = { ...i, qty: 1 };
+          addEntry(side, e);
+          freshen(e); // the collection keeps the price from when the card was saved
           added[k] = (added[k] || 0) + 1;
           draw();
         };
@@ -297,19 +373,10 @@ function pickFromCollection(side) {
 
 // ---------------- view ----------------
 
-function undoToast(msg, undo) {
-  const onclick = () => {
-    t.remove();
-    undo();
-  };
-  const t = el('div', { class: 'toast trade-undo', role: 'status' }, el('span', {}, msg), el('button', { type: 'button', onclick }, 'Undo'));
-  document.body.append(t);
-  setTimeout(() => t.remove(), 5000);
-}
-
 function summary(ev) {
   const total = ev.give.usd + ev.get.usd;
-  const giveShare = total ? (ev.give.usd / total) * 100 : 50;
+  const known = total && ev.verdict.kind !== 'unknown';
+  const giveShare = known ? (ev.give.usd / total) * 100 : 50;
   // Keep a sliver of each priced side visible.
   const width = ev.give.usd && ev.get.usd ? Math.min(98.5, Math.max(1.5, giveShare)) : giveShare;
   const sideBox = (s) =>
@@ -324,7 +391,7 @@ function summary(ev) {
       el('div', { class: 'ts-totals' }, sideBox('give'), el('span', { class: 'ts-vs', 'aria-hidden': 'true' }, 'vs'), sideBox('get')),
       el(
         'div',
-        { class: `ts-bar${total ? '' : ' empty'}`, role: 'img', 'aria-label': `Value split: you give ${Math.round(giveShare)}%, you get ${Math.round(100 - giveShare)}%` },
+        { class: `ts-bar${known ? '' : ' empty'}`, role: 'img', 'aria-label': known ? `Value split: you give ${Math.round(giveShare)}%, you get ${Math.round(100 - giveShare)}%` : 'Value split: not known' },
         el('span', { class: 'ts-give', style: `width: ${width.toFixed(2)}%` }),
         el('span', { class: 'ts-get' }),
         el('i', { class: 'ts-mid' }),

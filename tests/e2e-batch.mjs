@@ -43,6 +43,11 @@ const batchKeys = (p = page) =>
       }),
   );
 const png = async (spec) => ({ name: 'card.png', mimeType: 'image/png', buffer: await makeCard(page, spec) });
+const tradeSide = (side) => page.evaluate((side) => (JSON.parse(localStorage.getItem('trade.v1'))?.[side] || []).map((e) => `${e.id}×${e.qty}`).join(), side);
+const tradeCount = (side) =>
+  page.evaluate((side) => (JSON.parse(localStorage.getItem('trade.v1'))?.[side] || []).reduce((m, e) => ({ ...m, [e.id]: (m[e.id] || 0) + e.qty }), {}), side);
+const maybe = (sel, timeout = 5000) => page.waitForSelector(sel, { timeout }).catch(() => null); // null: report a FAIL, don't hang
+const plainToast = () => page.evaluate(() => [...document.querySelectorAll('.toast[data-plain]')].map((t) => t.textContent).join(' | '));
 
 // ---- empty state ----
 await page.click('.tab[data-view="batch"]');
@@ -176,6 +181,19 @@ t.check(
   JSON.stringify(ev),
 );
 
+// Sending again: cards already in the trade are not sent twice unless the user asks for copies.
+const giveSent = await tradeSide('give');
+await page.click('.tab[data-view="batch"]');
+got = await items();
+await page.click('#batch-trade');
+const againMsg = await page.textContent('.modal p');
+await page.click('.modal .btn:has-text("Cancel")');
+t.check(
+  'sent cards are tagged "In trade"; sending again asks before adding copies (Cancel adds nothing)',
+  got.every((i) => i.tags.includes('In trade · You give')) && /already in the trade.*again/.test(againMsg) && (await tradeSide('give')) === giveSent && giveSent === 'sv03-215×1,base1-4×1,me03-024×1',
+  `${againMsg} | ${giveSent} | ${got.map((i) => i.tags)}`,
+);
+
 // ---- batch mode on the Scan tab: the Photo button saves without identifying ----
 await page.click('.tab[data-view="scan"]');
 await page.click('#btn-mode');
@@ -186,6 +204,21 @@ await page.setInputFiles('#file-input', { name: 'photo.jpg', mimeType: 'image/jp
 await page.waitForFunction(() => document.querySelector('#batch-count')?.textContent === '2');
 const mode = await page.textContent('#btn-mode');
 t.check('batch mode: Photo adds to the queue, nothing is identified', mode === 'Batch mode: On · 2 saved' && (await page.isHidden('#sheet')) && (await page.isVisible('#view-scan.active')), mode);
+
+// Scanning for a trade pauses batch mode (each card is identified); Done brings it back.
+await page.click('.tab[data-view="trade"]');
+await page.click('#trade-give button:has-text("Scan")');
+await page.waitForSelector('#view-scan.active #scan-target:not([hidden])');
+const paused = [await page.textContent('#btn-mode'), await plainToast()];
+await page.click('#btn-target-done');
+await page.waitForSelector('#view-trade.active');
+await page.click('.tab[data-view="scan"]');
+const resumed = await page.textContent('#btn-mode');
+t.check(
+  'scanning for a trade pauses batch mode and says so; Done turns it back on',
+  /^Batch mode: Off/.test(paused[0]) && /paused/.test(paused[1]) && resumed === 'Batch mode: On · 2 saved',
+  `${paused.join(' / ')} → ${resumed}`,
+);
 await page.click('#btn-mode'); // back to single mode
 await page.click('.tab[data-view="batch"]');
 await thumbsLoaded();
@@ -213,14 +246,51 @@ got = await items();
 s = await stats();
 t.check('fixing a "No match" by hand clears the flag', got[3].name === 'Charizard' && got[3].price === '$954.65' && !got[3].flag && s['to check'] === '0', JSON.stringify([got[3], s]));
 
-// ---- remove / clear done ----
+// ---- send to trade again: only the 2 new cards go, nothing is doubled ----
+const tradeLabel = await page.textContent('#batch-trade');
+await page.click('#batch-trade');
+const newMsg = await page.textContent('.modal p');
+await page.click('.modal .btn:has-text("You get")');
+await page.waitForSelector('#view-trade.active');
+const sentToast = await plainToast();
+const [giveNow, getNow] = [await tradeSide('give'), await tradeSide('get')];
+t.check(
+  'Send to trade again sends only the cards not in the trade yet and says how many were left out',
+  tradeLabel === 'Send 2 new to trade…' && /2 new cards.*3 already in the trade/.test(newMsg) && /Sent 2 new cards.*3 were already in the trade/.test(sentToast) && giveNow === giveSent && getNow === 'base1-4×1,me03-024×1',
+  `${tradeLabel} | ${newMsg} | ${sentToast} | give ${giveNow} | get ${getNow}`,
+);
+await page.click('.tab[data-view="batch"]');
+
+// ---- ✕ removes a row at once with Undo; the photo is deleted once Undo has passed ----
+const id5 = await page.getAttribute('#batch-list .bitem:nth-child(5)', 'data-id');
+const box = await page.$eval('#batch-list .bitem:nth-child(5) .b-remove', (b) => [b.offsetWidth, b.offsetHeight].join('x'));
 await page.click('#batch-list .bitem:nth-child(5) .b-remove');
 await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem').length === 4);
+const undo = await maybe('.toast-action button:has-text("Undo")');
+await shot(page, 'undo');
+if (undo) {
+  await undo.click();
+  await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem').length === 5);
+  await thumbsLoaded();
+}
+const restored = await page.getAttribute('#batch-list .bitem:nth-child(5)', 'data-id').catch(() => null);
+let keys = await batchKeys();
+t.check('✕ (40px) offers Undo, which brings the row back with its photo', box === '40x40' && restored === id5 && keys.includes(`batch:photo:${id5}`), `${box} ${restored} ${keys}`);
+if (undo) {
+  await page.click('#batch-list .bitem:nth-child(5) .b-remove');
+  await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem').length === 4);
+}
+await page.waitForSelector('.toast-action', { state: 'detached', timeout: 10000 });
+await page.waitForTimeout(300);
+keys = await batchKeys();
+t.check('…without Undo its photo is deleted from storage', !keys.some((k) => k.endsWith(id5)), keys.join());
+
+// ---- clear done ----
 await page.click('#batch-clear-done');
 await page.click('.modal .btn.primary:has-text("Remove")');
 await page.waitForSelector('.b-empty');
-let keys = await batchKeys();
-t.check('remove + Clear done delete the photos from storage', keys.join() === 'batch:items', keys.join());
+keys = await batchKeys();
+t.check('Clear done deletes the photos from storage', keys.join() === 'batch:items', keys.join());
 
 // ---- storage full: clear message, nothing half-saved ----
 await page.evaluate(() => {
@@ -240,14 +310,52 @@ await page.evaluate(() => window.__restorePut());
 keys = await batchKeys();
 t.check('storage full → clear message, nothing half-saved', /out of space/.test(quota) && (await page.isVisible('.b-empty')) && keys.join() === 'batch:items', `${quota} | ${keys}`);
 
+// ---- a photo that can't be opened is reported, not hidden behind the count ----
+const notImage = { name: 'photo.heic', mimeType: 'image/heic', buffer: Buffer.from('not a picture') };
+await page.setInputFiles('#batch-file-input', [await png(CARDS.aurorus), notImage, await png(CARDS.baseCharizard)]);
+await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem').length === 2 && !document.querySelector('.b-saving'));
+await page.waitForTimeout(300);
+const pickToast = await plainToast();
+t.check('picking 3 photos where 1 can\'t be opened says so in the toast that stays', pickToast === "2 photos added to batch · 1 photo couldn't be opened", pickToast);
+
 // ---- clear all ----
-await page.setInputFiles('#batch-file-input', [await png(CARDS.aurorus), await png(CARDS.baseCharizard)]);
-await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem').length === 2);
 await page.click('#batch-clear-all');
 await page.click('.modal .btn.primary:has-text("Delete all")');
 await page.waitForSelector('.b-empty');
 keys = await batchKeys();
 t.check('Clear all empties the batch and its storage', !keys.length && (await page.isHidden('#batch-count')), keys.join());
+
+// Clear all while photos are still being saved: the save stops and nothing comes back.
+const eight = [];
+for (let i = 0; i < 8; i++) eight.push(await png(i % 2 ? CARDS.aurorus : CARDS.baseCharizard));
+await page.setInputFiles('#batch-file-input', eight);
+await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem').length >= 2);
+await page.click('#batch-clear-all');
+await page.waitForSelector('.modal .btn.primary:has-text("Delete all")');
+// Tap "Delete all" while the next photo is being written (a separate task, like a real tap).
+await page.evaluate(() => {
+  const put = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function (v, k) {
+    if (String(k).startsWith('batch:photo:')) {
+      IDBObjectStore.prototype.put = put;
+      setTimeout(() => document.querySelector('.modal .btn.primary')?.click(), 0);
+    }
+    return put.call(this, v, k);
+  };
+});
+await page.waitForFunction(() => !document.querySelector('.b-saving'), null, { timeout: 60000 });
+const tapped = !(await page.$('.modal'));
+if (!tapped) await page.click('.modal .btn.primary:has-text("Delete all")');
+await page.waitForTimeout(500);
+keys = await batchKeys();
+const left = (await items()).length;
+t.check('Clear all during a multi-photo save: the batch and its storage stay empty', tapped && !left && !keys.length && (await page.isVisible('.b-empty')), `tapped mid-save ${tapped}, ${left} rows, keys ${keys}`);
+if (left) {
+  // Start the next part from an empty batch anyway.
+  await page.click('#batch-clear-all');
+  await page.click('.modal .btn.primary:has-text("Delete all")');
+  await page.waitForSelector('.b-empty');
+}
 
 // ---- stop, photos added mid-run, reload mid-run ----
 await page.setInputFiles('#batch-file-input', [await png(CARDS.charizardEx), await png(CARDS.baseCharizard), await png(CARDS.aurorus)]);
@@ -294,6 +402,84 @@ await allDone(9);
 got = await items();
 t.check('…and processing again finishes the batch', got.every((i) => i.status === 'matched') && got[7].name === 'Aurorus' && got[8].name === 'Charizard ex', got.map((i) => i.name).join());
 await shot(page, 'long-list');
+
+// ---- several Library photos while adding cards to a trade: Batch offers to send just those ----
+const getBefore = await tradeCount('get');
+const forTrade = [await png(CARDS.charizardEx), await png(CARDS.aurorus)];
+await page.click('.tab[data-view="trade"]');
+await page.click('#trade-get button:has-text("Scan")');
+await page.waitForSelector('#view-scan.active #scan-target:not([hidden])');
+await page.setInputFiles('#file-input-library', forTrade);
+await page.waitForFunction(() => document.querySelector('#view-batch.active') && document.querySelectorAll('#batch-list .bitem').length === 11, null, { timeout: 20000 });
+const pickedToast = await plainToast();
+const note = (await (await page.$('.b-trade-note.get'))?.textContent()) || '';
+await shot(page, 'trade-note');
+await page.click('#batch-process');
+await allDone(11);
+const sendBtn = await page.$('#batch-send-get');
+const sendLabel = await sendBtn?.textContent();
+if (sendBtn) {
+  await sendBtn.click();
+  const confirmSend = await maybe('.modal .btn.primary:has-text("Add all")', 1000);
+  if (confirmSend) await confirmSend.click();
+  await page.waitForSelector('#view-trade.active');
+}
+const getAfter = await tradeCount('get');
+const gained = Object.entries(getAfter).filter(([id, q]) => q !== (getBefore[id] || 0)).map(([id, q]) => `${id}+${q - (getBefore[id] || 0)}`).sort().join();
+t.check(
+  'Library photos picked for "You get" are marked; "Send 2 to You get" sends just those',
+  /2 photos added to batch for “You get”/.test(pickedToast) && /2 photos for “You get”/.test(note) && sendLabel === 'Send 2 to You get' && gained === 'me03-024+1,sv03-125+1' && !(await page.$('.b-trade-note')),
+  `${pickedToast} | ${note} | ${sendLabel} | gained ${gained}`,
+);
+
+// ---- a scan finishing while a batch review sheet is open doesn't take the sheet over ----
+const scanPhoto = await png(CARDS.baseCharizard);
+await page.click('.tab[data-view="scan"]');
+const cdp = await page.context().newCDPSession(page);
+await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 }); // phone speed: the scan takes a few seconds
+await page.setInputFiles('#file-input-library', scanPhoto);
+await page.waitForSelector('#guide.busy');
+await page.click('.tab[data-view="batch"]');
+await page.click('#batch-list .bitem:nth-child(1) .b-main');
+await page.waitForSelector('#sheet:not([hidden]) .actions .btn:has-text("Use this card")');
+const scanning = await page.evaluate(() => document.querySelector('#guide').classList.contains('busy'));
+await page.waitForFunction(() => !document.querySelector('#guide.busy'), null, { timeout: 120000 });
+await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+const kept = await page.evaluate(() => ({
+  name: document.querySelector('.detail-name')?.textContent,
+  use: document.querySelectorAll('.actions .btn.wide').length,
+  offer: document.querySelector('.toast-action')?.textContent,
+}));
+await page.click('.actions .btn:has-text("Add to collection")');
+await page.click('.sheet-close');
+got = await items();
+const view = await maybe('.toast-action:has-text("Scan ready") button:has-text("View")');
+await shot(page, 'scan-ready');
+const sheetStayedShut = await page.isHidden('#sheet');
+let viewed = false;
+if (view) {
+  await view.click();
+  viewed = await page
+    .waitForFunction(() => document.querySelector('.detail-name')?.textContent === 'Charizard' && !document.querySelector('.actions .btn.wide'), null, { timeout: 20000 })
+    .then(() => true, () => false);
+  await page.click('.sheet-close');
+}
+t.check(
+  'scan done while a review sheet is open: the review stays, its Add to collection marks that item, the scan is offered with View',
+  scanning && kept.name === 'Charizard ex' && kept.use === 1 && /Scan ready: Charizard/.test(kept.offer) && got[0].name === 'Charizard ex' && got[0].tags.includes('In collection') && sheetStayedShut && viewed,
+  `${scanning} ${JSON.stringify(kept)} ${JSON.stringify(got[0])} shut=${sheetStayedShut} viewed=${viewed}`,
+);
+
+// Any other sheet that replaces a review sheet: its buttons don't change the batch item.
+await page.click('#batch-list .bitem:nth-child(2) .b-main');
+await page.waitForSelector('#sheet:not([hidden]) .actions .btn:has-text("Use this card")');
+await page.evaluate(() => import('/js/sheet.js').then((m) => m.openCard('sv03-215', {})));
+await page.waitForFunction(() => document.querySelector('.detail-meta')?.textContent.includes('215/197'), null, { timeout: 20000 });
+await page.click('.actions .btn:has-text("Add to collection")');
+await page.click('.sheet-close');
+got = await items();
+t.check('an action from a sheet that replaced the review sheet leaves the batch item alone', got[1].name === 'Charizard' && !got[1].tags.includes('In collection'), JSON.stringify(got[1]));
+
 await page.click('#batch-clear-all');
 await page.click('.modal .btn.primary:has-text("Delete all")');
 await page.waitForSelector('.b-empty');

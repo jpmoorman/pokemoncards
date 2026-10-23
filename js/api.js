@@ -101,27 +101,36 @@ function expand(catalog) {
   return { cards, sets: catalog.sets, updated: catalog.updated };
 }
 
-const cardMem = new Map();
-/** Full card details including prices. */
-export async function getCard(id) {
-  if (cardMem.has(id)) return cardMem.get(id);
+const cardMem = new Map(); // id -> { t, card }, same as the IndexedDB copy
+/**
+ * Full card details including prices, kept for 12 hours.
+ * { fresh: true } downloads them again (Refresh prices); offline it still falls back to the saved copy.
+ */
+export async function getCard(id, { fresh = false } = {}) {
   const key = `card:${id}`;
-  const cached = await kvGet(key);
-  if (cached && Date.now() - cached.t < CARD_MAX_AGE) {
-    cardMem.set(id, cached.card);
+  const cached = cardMem.get(id) || (await kvGet(key));
+  if (!fresh && cached && Date.now() - cached.t < CARD_MAX_AGE) {
+    cardMem.set(id, cached);
     return cached.card;
   }
   try {
     const card = await getJSON(`/cards/${encodeURIComponent(id)}`);
     if (card) {
-      cardMem.set(id, card);
-      kvSet(key, { t: Date.now(), card });
+      const copy = { t: Date.now(), card };
+      cardMem.set(id, copy);
+      kvSet(key, copy);
     }
     return card;
   } catch (e) {
-    if (cached) return cached.card; // offline: show last known prices
-    throw e;
+    if (!cached) throw e;
+    cardMem.set(id, cached);
+    return cached.card; // offline: show last known prices
   }
+}
+
+/** When the copy of a card that getCard last returned was downloaded (ms since epoch), 0 if never. */
+export function cardFetchedAt(id) {
+  return cardMem.get(id)?.t || 0;
 }
 
 /**

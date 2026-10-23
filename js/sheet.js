@@ -79,7 +79,7 @@ function openSheet() {
 export function closeSheet() {
   $('#sheet').hidden = true;
   document.body.style.overflow = '';
-  emit('sheet:closed', {});
+  emit('sheet:closed', { owner: sheet.opts.owner });
 }
 
 /**
@@ -87,8 +87,10 @@ export function closeSheet() {
  *   ranked - [{ card, set }] best first (may be empty)
  *   clues  - what OCR read (null hides the "what the camera read" box)
  *   debug  - raw OCR text (null hides it)
- *   opts   - { onPick(card, row), pickLabel, preferred }
+ *   opts   - { onPick(card, row), pickLabel, preferred, tradeSide, owner }
  *            onPick adds a primary "Use this card" button (batch review).
+ *            owner is any token naming who opened the sheet; it comes back as detail.owner
+ *            in 'card:action' and 'sheet:closed', so a view only acts on its own sheet.
  */
 export function showResults(ranked, clues, debug, opts = {}) {
   sheet.opts = opts;
@@ -143,6 +145,7 @@ export function openCard(id, opts = {}) {
   sheet.opts = opts;
   sheet.clues = null;
   openSheet();
+  $('#sheet .sheet-panel').scrollTop = 0; // the panel keeps the last sheet's scroll position
   $('#detected').hidden = true;
   $('#debug-wrap').hidden = true;
   $('#alternates-wrap').hidden = true;
@@ -291,7 +294,7 @@ function renderDetail() {
         onclick: () => {
           const entry = makeEntry(card, row);
           // Listeners may set detail.toast to describe what they actually did.
-          const detail = { action, card, row, entry, toast: null };
+          const detail = { action, card, row, entry, owner: sheet.opts.owner, toast: null };
           emit('card:action', detail);
           toast(detail.toast || { collection: 'Added to collection', 'trade-give': 'Added to "You give"', 'trade-get': 'Added to "You get"' }[action]);
           // Scanning cards for a trade: close so the next card can be scanned straight away.

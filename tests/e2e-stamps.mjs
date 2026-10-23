@@ -12,6 +12,16 @@ import { makeStampedCard } from './stamp-helpers.mjs';
 
 const h = await startHarness();
 const t = reporter();
+// Log every message to the OCR worker (see section 5).
+await h.context.addInitScript(() => {
+  window.__ocrLog = [];
+  const post = Worker.prototype.postMessage;
+  Worker.prototype.postMessage = function (msg, ...rest) {
+    if (msg?.action === 'setParameters') window.__ocrLog.push(`P${msg.payload.params.tessedit_pageseg_mode}`);
+    else if (msg?.action === 'recognize') window.__ocrLog.push('R');
+    return post.call(this, msg, ...rest);
+  };
+});
 const page = await h.newPage();
 
 /** Upload a picture into the app and read the version the sheet picked. */
@@ -134,7 +144,44 @@ for (const setup of ['toploader', 'turned', 'steep']) {
   t.check(`random photos: stamped version picked ${stampedOk}/${stampedN}`, stampedOk >= Math.ceil(stampedN * 0.75), misses.join('\n'));
 }
 
-// 5) Optional real photos: STAMP_PHOTOS="/abs/a.jpg=Set Logo Stamp,/abs/b.jpg=Holo".
+// 5) Scanning a card while the Batch tab processes another photo: both share one OCR
+// worker, and a read must never run in the other job's OCR mode (a stamp read in block
+// mode loses the stamp). The other photo's name isn't a card, so it is re-read in block mode.
+{
+  const stamped = await makePhoto(page, CARDS.aurorus, { ...PHOTOS.toploader, cardImage: await makeStampedCard(page, CARDS.aurorus, 'set-logo') });
+  const other = await makePhoto(page, { ...CARDS.charizardEx, name: 'Qwyx Zorbat', stage: '' }, { background: 'wood', rotate: 5 });
+  const r = await page.evaluate(
+    async ({ a, b }) => {
+      const { identify } = await import('/js/identify.js');
+      const { fileToCanvas } = await import('/js/ocr.js');
+      const { getCard } = await import('/js/api.js');
+      const { variantPrices } = await import('/js/prices.js');
+      const { chooseVariant } = await import('/js/stamps.js');
+      const canvas = async (b64) => fileToCanvas(await (await fetch(`data:image/jpeg;base64,${b64}`)).blob());
+      const version = async (res) => {
+        const card = await getCard('me03-024');
+        const rows = variantPrices(card);
+        return rows[chooseVariant(rows, { card, clues: res.clues })]?.label;
+      };
+      const alone = await identify(await canvas(a), () => {});
+      const log = window.__ocrLog.length;
+      const [both] = await Promise.all([identify(await canvas(a), () => {}), identify(await canvas(b), () => {})]);
+      const msgs = window.__ocrLog.slice(log);
+      return {
+        alone: await version(alone),
+        together: await version(both),
+        art: [alone.clues.artText, both.clues.artText],
+        blockReads: msgs.filter((m) => m === 'P6').length,
+        // Every recognize right after its own mode change, never two mode changes in a row.
+        interleaved: msgs.some((m, i) => m[0] === 'P' && msgs[i + 1]?.[0] === 'P'),
+      };
+    },
+    { a: stamped.buffer.toString('base64'), b: other.buffer.toString('base64') },
+  );
+  t.check('scanning while a batch runs: same stamp and version as alone', r.alone === 'Set Logo Stamp' && r.together === r.alone && r.art[0] === r.art[1] && r.blockReads > 0 && !r.interleaved, JSON.stringify(r));
+}
+
+// 6) Optional real photos: STAMP_PHOTOS="/abs/a.jpg=Set Logo Stamp,/abs/b.jpg=Holo".
 for (const item of (process.env.STAMP_PHOTOS || '').split(',').filter(Boolean)) {
   const [file, version] = item.split('=');
   const got = await scan(fs.readFileSync(file), `real-${path.basename(file, path.extname(file))}`, 'image/jpeg');

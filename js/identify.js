@@ -1,7 +1,9 @@
 // Photo -> ranked card matches. Used by the live scanner and by batch processing.
-import { getWorker, readCard } from './ocr.js';
+import { getWorker, readCard, readStamps } from './ocr.js';
 import { rankCandidates, findNamesInText } from './match.js';
 import { catalog, catalogReady, abbrReady } from './catalog.js';
+import { getCard } from './api.js';
+import { variantPrices } from './prices.js';
 
 /**
  * Read a card image (camera guide crop or a whole photo) and rank matching cards.
@@ -24,5 +26,22 @@ export async function identify(canvas, onStatus) {
   await ready;
   if (clues.setCodes.length || clues.codeCandidates.length) await abbrReady();
   const ranked = rankCandidates(catalog.index, clues, catalog.setAbbr);
+  // Stamps (set logo, 1st Edition, Play! Pokémon…) tell versions apart: worth an extra
+  // read only when the best match comes with any.
+  if (card && ranked.length && (await mayBeStamped(ranked[0].card.id))) {
+    onStatus?.('Checking for stamps…');
+    try {
+      clues.artText = await readStamps(card);
+    } catch (e) {
+      console.warn('artwork read failed', e);
+    }
+    debug.art = clues.artText;
+  }
   return { ranked, clues, debug, card };
+}
+
+/** False only when card `id` is known to have no stamped version (its prices are needed next anyway). */
+async function mayBeStamped(id) {
+  const details = await Promise.race([getCard(id).catch(() => null), new Promise((r) => setTimeout(r, 2500, null))]);
+  return !details || variantPrices(details).some((r) => r.stamps.length);
 }

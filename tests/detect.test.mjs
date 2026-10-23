@@ -47,7 +47,7 @@ function cardCorners(cx, cy, w, deg = 0, tilt = 0, sx = 1, sy = 1) {
  * (border, inner panel, name and number text blocks, artwork) and an optional sticker
  * over the top-right corner. 2×2 supersampled so edges are soft like a real photo.
  */
-function scene({ w = 384, h = 512, corners, holder, sticker = false, background = [140, 118, 92], noise = 60, border = [201, 204, 209], seed = 1 }) {
+function scene({ w = 384, h = 512, corners, holder, sticker = false, background = [140, 118, 92], noise = 60, border = [201, 204, 209], seed = 1, next }) {
   const rand = rng(seed);
   const data = new Uint8ClampedArray(w * h * 4);
   const unit = [
@@ -57,6 +57,7 @@ function scene({ w = 384, h = 512, corners, holder, sticker = false, background 
     { x: 0, y: 1 },
   ];
   const toCard = corners && homography(corners, unit);
+  const toNext = next && homography(next, unit); // a second card (no sticker)
   const toHolder = holder && homography(holder, unit);
   const bg = new Float32Array(w * h);
   for (let i = 0; i < bg.length; i++) bg[i] = (rand() - 0.5) * noise;
@@ -67,9 +68,10 @@ function scene({ w = 384, h = 512, corners, holder, sticker = false, background 
       const q = applyHomography(toHolder, x, y);
       if (q.x >= 0 && q.x <= 1 && q.y >= 0 && q.y <= 1) c = c.map((v) => v * 0.75 + 255 * 0.25); // hazy plastic
     }
-    if (toCard) {
-      const { x: u, y: v } = applyHomography(toCard, x, y);
-      if (sticker && u > 0.72 && u < 1.12 && v > -0.06 && v < 0.12) return [246, 245, 240];
+    for (const to of [toCard, toNext]) {
+      if (!to) continue;
+      const { x: u, y: v } = applyHomography(to, x, y);
+      if (sticker && to === toCard && u > 0.72 && u < 1.12 && v > -0.06 && v < 0.12) return [246, 245, 240];
       if (u >= 0 && u <= 1 && v >= 0 && v <= 1) {
         if (u < 0.045 || u > 0.955 || v < 0.032 || v > 0.968) return border;
         if (v > 0.05 && v < 0.09 && u > 0.2 && u < 0.55 && Math.sin(u * 160) > -0.2) return [20, 20, 20]; // name
@@ -269,6 +271,42 @@ test('a faint silver border on a light table is still found', () => {
   const quads = findCardQuads(scene({ corners: truth, background: [214, 212, 206], noise: 8, seed: 9 }));
   assert.ok(quads.length, 'nothing found');
   assert.ok(cornerError(quads[0].corners, truth) < 0.075, `error ${cornerError(quads[0].corners, truth)}`);
+});
+
+// Any way round: the corner labels may start anywhere.
+const turnedError = (found, truth) => Math.min(...[0, 1, 2, 3].map((k) => cornerError(rotateCorners(found, k), truth)));
+
+test('a card lying sideways is found whole, not as its upright-looking half', () => {
+  // The artwork's edge cuts a sideways card into two upright, card-shaped halves that
+  // outscore it; the whole card must be offered for the reader to try.
+  for (const [deg, w, h, cx, cy, cw] of [
+    [90, 384, 512, 190, 260, 150],
+    [-90, 512, 384, 256, 190, 190],
+    [60, 384, 512, 190, 260, 150],
+    [-75, 512, 384, 256, 190, 180],
+  ]) {
+    const truth = cardCorners(cx, cy, cw, deg);
+    const [q] = findCardQuads(scene({ w, h, corners: truth, seed: 3 }));
+    assert.ok(q, `${deg}°: nothing found`);
+    const err = Math.min(turnedError(q.corners, truth), q.whole ? turnedError(q.whole.corners, truth) : Infinity);
+    // On this drawing a half may end on the artwork's side edge, 8% in; real cards' art reaches their inner frame.
+    assert.ok(err < 0.1, `${deg}°: card outline off by ${err.toFixed(3)} (chosen ${turnedError(q.corners, truth).toFixed(3)})`);
+  }
+});
+
+test('an upright card is not mistaken for half of a sideways one', () => {
+  const truth = cardCorners(190, 260, 200);
+  const [q] = findCardQuads(scene({ corners: truth, seed: 3 }));
+  assert.ok(cornerError(q.corners, truth) < 0.02 && !q.whole, `error ${cornerError(q.corners, truth)}, whole ${!!q.whole}`);
+});
+
+test('two upright cards side by side: one of the cards is chosen, not both as one sideways card', () => {
+  const left = cardCorners(120, 256, 150);
+  const right = cardCorners(276, 256, 150);
+  const [q] = findCardQuads(scene({ w: 400, h: 512, corners: left, next: right, seed: 5 }));
+  assert.ok(q && !q.landscape, 'picked a sideways outline');
+  const err = Math.min(cornerError(q.corners, left), cornerError(q.corners, right));
+  assert.ok(err < 0.03, `error ${err.toFixed(3)}`);
 });
 
 test('no card: nothing confident', () => {
