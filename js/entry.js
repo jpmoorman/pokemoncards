@@ -4,7 +4,7 @@
 //   variant - version label, "Set Logo Stamp"; variantId - row id from prices.variantPrices
 //   price   - { value, currency: 'USD', source, converted, original? } (older saves may be EUR)
 import { getCard } from './api.js';
-import { variantPrices, headlinePrice, printedNumber, variantImage, priceInUsd } from './prices.js';
+import { variantPrices, headlinePrice, printedNumber, variantImage, priceInUsd, eurToUsd } from './prices.js';
 import { fx } from './fx.js';
 
 export function makeEntry(card, row) {
@@ -49,7 +49,10 @@ export async function refreshEntry(entry) {
 
 /** Unit price in USD (converts prices saved in EUR by older versions). */
 export function unitUsd(entry) {
-  return priceInUsd(entry.price, fx().rate);
+  const p = entry.price;
+  // Converted from euros: recompute with today's rate rather than the rate on the day it was saved.
+  if (p?.converted && p.original?.currency === 'EUR') return eurToUsd(p.original.value, fx().rate);
+  return priceInUsd(p, fx().rate);
 }
 
 export function totalUsd(entries) {

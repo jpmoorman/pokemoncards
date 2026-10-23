@@ -109,7 +109,7 @@ export function showResults(ranked, clues, debug, opts = {}) {
 
   if (debug) {
     $('#debug-wrap').hidden = false;
-    $('#debug').textContent = Object.entries({ 'NAME AREA': debug.name, 'BOTTOM AREA': debug.bottom, ARTWORK: debug.art, 'WHOLE CARD': debug.full })
+    $('#debug').textContent = Object.entries({ 'CARD OUTLINE': debug.detect, 'NAME AREA': debug.name, 'BOTTOM AREA': debug.bottom, ARTWORK: debug.art, 'WHOLE CARD': debug.full })
       .filter(([, v]) => v)
       .map(([k, v]) => `${k}:\n${v}`)
       .join('\n\n');
@@ -290,8 +290,10 @@ function renderDetail() {
         type: 'button',
         onclick: () => {
           const entry = makeEntry(card, row);
-          emit('card:action', { action, card, row, entry });
-          toast({ collection: 'Added to collection', 'trade-give': 'Added to "You give"', 'trade-get': 'Added to "You get"' }[action]);
+          // Listeners may set detail.toast to describe what they actually did.
+          const detail = { action, card, row, entry, toast: null };
+          emit('card:action', detail);
+          toast(detail.toast || { collection: 'Added to collection', 'trade-give': 'Added to "You give"', 'trade-get': 'Added to "You get"' }[action]);
           // Scanning cards for a trade: close so the next card can be scanned straight away.
           if (sheet.opts.tradeSide && action.startsWith('trade-')) closeSheet();
         },

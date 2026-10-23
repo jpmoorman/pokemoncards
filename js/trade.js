@@ -145,7 +145,8 @@ function openLine(side, e) {
   });
 }
 
-function onCardAction({ action, card, row, entry }) {
+function onCardAction(detail) {
+  const { action, card, row, entry } = detail;
   const side = { 'trade-give': 'give', 'trade-get': 'get' }[action];
   if (!side) return;
   // Batch results send only `entry`; the sheet sends card + row too.
@@ -153,8 +154,10 @@ function onCardAction({ action, card, row, entry }) {
   if (!e?.id) return;
   const ed = editing;
   const line = ed && trade[ed.side].find((x) => entryKey(x) === ed.key);
-  if (line && ed.side === side && line.id === e.id && entryKey(e) !== ed.key) replaceLine(side, ed.key, e);
-  else addEntry(side, e);
+  if (line && ed.side === side && line.id === e.id && entryKey(e) !== ed.key) {
+    replaceLine(side, ed.key, e);
+    detail.toast = `Changed to ${e.variant || 'that version'}`;
+  } else addEntry(side, e);
   // Opened from a trade line: go straight back to the updated trade.
   if (ed) closeSheet();
 }

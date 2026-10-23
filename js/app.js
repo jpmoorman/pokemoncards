@@ -82,8 +82,14 @@ function bindTabs() {
       showView('trade');
     }
   });
-  on('app:navigate', ({ view, tradeSide }) => {
-    if (view === 'scan') setTradeSide(tradeSide || null);
+  on('app:navigate', ({ view, tradeSide, batchMode }) => {
+    if (view === 'scan') {
+      setTradeSide(tradeSide || null);
+      if (batchMode && !state.batchMode) {
+        state.batchMode = true;
+        updateModeButton();
+      }
+    }
     showView(view);
   });
   document.addEventListener('visibilitychange', () => {
@@ -187,8 +193,7 @@ async function scanFromCamera() {
   const canvas = captureGuide($('#video'), $('#guide'));
   if (state.batchMode) {
     flashGuide();
-    await enqueueCanvas(canvas);
-    toast(`Saved for later · ${batchCount()} in batch`, 1400);
+    if (await enqueueCanvas(canvas)) toast(`Saved for later · ${batchCount()} in batch`, 1400);
     return;
   }
   await runScan(canvas);
@@ -206,9 +211,9 @@ async function onFiles(e) {
   e.target.value = '';
   if (!files.length || state.busy) return;
   if (state.batchMode || files.length > 1) {
-    await enqueueFiles(files);
-    toast(`${files.length} photo${files.length > 1 ? 's' : ''} added to batch`);
-    if (!state.batchMode) showView('batch');
+    const n = await enqueueFiles(files);
+    if (n) toast(`${n} photo${n > 1 ? 's' : ''} added to batch`);
+    if (!state.batchMode && n) showView('batch');
     return;
   }
   try {

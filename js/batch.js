@@ -630,9 +630,7 @@ function addPhotosButton(label, cls = 'btn') {
 }
 
 function startBatchScanning() {
-  navigate('scan');
-  const mode = $('#btn-mode');
-  if (mode && mode.getAttribute('aria-pressed') !== 'true') mode.click();
+  navigate('scan', { batchMode: true });
 }
 
 const STACK_ICON =
