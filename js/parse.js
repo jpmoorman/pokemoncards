@@ -67,6 +67,8 @@ export function parseBottomText(text) {
   if (!numbers.length) {
     const looseRe = /(?<![0-9])(\d{1,3})\s*[|\\lI]\s*(\d{2,3})(?![0-9])/g;
     for (const m of t.matchAll(looseRe)) push('', m[1], m[2]);
+    // ...or as "," / "." in a zero-padded modern number ("024,088").
+    for (const m of t.matchAll(/(?<![0-9])(\d{3})\s?[,.]\s?(\d{3})(?![0-9])/g)) push('', m[1], m[2]);
   }
 
   // Set codes printed on Scarlet & Violet / Mega Evolution era cards: "OBF EN".

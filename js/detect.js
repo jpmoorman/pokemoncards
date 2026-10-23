@@ -203,7 +203,6 @@ export function edgeMap(img) {
   // Non-maximum suppression along the gradient, then an adaptive threshold.
   const ori = new Uint8Array(n);
   const edge = new Uint8Array(n);
-  const kept = [];
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
@@ -220,15 +219,16 @@ export function edgeMap(img) {
       else if (a < 67.5) j = w + 1;
       else if (a < 112.5) j = w;
       else j = w - 1;
-      if (m >= mag[i + j] && m > mag[i - j]) {
-        edge[i] = 1;
-        kept.push(m);
-      }
+      if (m >= mag[i + j] && m > mag[i - j]) edge[i] = 1;
     }
   }
-  // Keep the stronger edges: carpets and wood grain make plenty of weak ones.
-  kept.sort((a, b) => a - b);
-  const thr = Math.max(6, kept.length ? kept[Math.floor(kept.length * 0.6)] * 0.8 : 0);
+  // Keep edges well above the scene's own texture: a carpet or wood grain raises the
+  // bar, a plain table lets a faint silver border through.
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < n; i++) hist[Math.min(255, mag[i] | 0)]++;
+  let median = 0;
+  for (let acc = 0; median < 255 && (acc += hist[median]) < n / 2; median++);
+  const thr = Math.max(5, 3 * median);
   for (let i = 0; i < n; i++) if (edge[i] && mag[i] < thr) edge[i] = 0;
   return { width: w, height: h, mag, ori, edge };
 }
@@ -404,7 +404,7 @@ export function findCardQuads(img, opts = {}) {
   }
   quads.sort((a, b) => b.score - a.score);
   if (!quads.length) return [];
-  const pick = preferCard(quads, img);
+  const pick = preferCard(quads, img, em);
   const ordered = [pick, ...quads.filter((q) => q !== pick)];
   ordered[0] = refineQuad(em, ordered[0]);
   return ordered;
@@ -471,81 +471,79 @@ function scoreQuad(lines, covs, A, B, w, h, margin, o) {
 
 /**
  * Cards are often photographed in a toploader or sleeve, whose edges also form a
- * card-shaped rectangle; and the card's own inner frame forms a smaller one.
- * Walk inwards while the outer rectangle looks see-through (the band between it and
- * the next rectangle inside looks like the background outside it), then outwards
- * while the band looks like a card border (uniform and unlike what's outside).
+ * card-shaped rectangle, and the card's own inner frame forms a slightly smaller one.
+ * Take the largest well-shaped outline that isn't a holder:
+ *  - a holder has another card-shaped outline inside at ≤ 76% of its area (a card in a
+ *    toploader is ~70%; a card's inner frame is 78–88% of the card), or
+ *  - background texture (carpet, wood) shows between it and a snug outline inside.
  */
-function preferCard(quads, img) {
-  let best = quads[0];
-  const strong = quads.filter((q) => q.score >= best.score * 0.5 && !q.landscape);
-  const nested = (outer, inner, lo, hi) =>
-    inner !== outer &&
-    inner.area / outer.area > lo &&
-    inner.area / outer.area < hi &&
-    inner.corners.every((p) => insideQuad(outer.corners, p, 2));
-  // Inwards: out of a toploader / sleeve.
-  for (let step = 0; step < 3; step++) {
-    const holderOf = strong
-      .filter((q) => q.aspectError < 0.12 && nested(best, q, 0.4, 0.88))
-      .sort((a, b) => b.score - a.score)
-      .find((q) => bandLooksLikeOutside(img, best.corners, q.corners, true) === true);
-    if (!holderOf) break;
-    best = holderOf;
+function preferCard(quads, img, em) {
+  const best = quads[0];
+  const pool = quads.filter((q) => !q.landscape && q.aspectError < 0.1 && q.score >= best.score * 0.5);
+  if (!pool.length) return best;
+  const eligible = new Set(pool.filter((q) => q.score >= best.score * 0.75));
+  const byArea = [...pool].sort((a, b) => b.area - a.area);
+  for (const outer of byArea) {
+    if (!eligible.has(outer)) continue;
+    const size = quadSize(outer.corners);
+    const inside = byArea
+      .filter((q) => q !== outer && q.area / outer.area > 0.4 && q.area / outer.area < 0.97)
+      .filter((q) => q.corners.every((p) => insideQuad(outer.corners, p, 2)))
+      .sort((a, b) => b.score - a.score);
+    const held = inside.filter((q) => q.area / outer.area <= 0.76 && q.corners.every((p) => insideQuad(outer.corners, p, -0.01 * size.h)));
+    if (held.length) {
+      held.forEach((q) => eligible.add(q));
+      continue;
+    }
+    const snug = inside.find((q) => bandShowsBackground(img, em, outer.corners, q.corners));
+    if (snug) {
+      eligible.add(snug);
+      continue;
+    }
+    return outer;
   }
-  // Outwards: the card's inner frame often scores a little higher than its outer edge
-  // (a sticker or glare hides part of the edge). A nearly-as-good rectangle just
-  // around it that doesn't look see-through is the card itself.
-  const edgeOf = strong
-    .filter((q) => q.score >= best.score * 0.85 && q.aspectError < 0.12 && nested(q, best, 0.72, 0.97))
-    .sort((a, b) => b.score - a.score)
-    .find((q) => bandLooksLikeOutside(img, q.corners, best.corners, false) !== true);
-  return edgeOf || best;
+  return best;
 }
 
-/** Mean colour of `img` at points p(s) for s along each of the 4 sides. */
-function sideMeans(img, pointsOnSide) {
+/**
+ * Does the background (textured and coloured like what's just outside `outer`) show
+ * in the band between `outer` and `inner`, on every side where there is a band?
+ * True for a sleeve or a loose outline around the card; false for a card border.
+ */
+export function bandShowsBackground(img, em, outer, inner) {
   const { width: w, height: h, data } = img;
-  return pointsOnSide.map((pts) => {
+  const minW = Math.max(2, 0.012 * (quadSize(outer).w + quadSize(outer).h));
+  const stats = (pts) => {
     let r = 0;
     let g = 0;
     let b = 0;
+    let t = 0;
     let n = 0;
     for (const p of pts) {
       const x = Math.round(p.x);
       const y = Math.round(p.y);
-      if (x < 0 || y < 0 || x >= w || y >= h) continue;
-      const i = (y * w + x) * 4;
-      r += data[i];
-      g += data[i + 1];
-      b += data[i + 2];
+      if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) continue;
+      const i = y * w + x;
+      r += data[i * 4];
+      g += data[i * 4 + 1];
+      b += data[i * 4 + 2];
+      t += em.mag[i];
       n++;
     }
-    return n >= 4 ? [r / n, g / n, b / n] : null;
-  });
-}
-
-/**
- * Is the band between `outer` and `inner` (both TL,TR,BR,BL) the same stuff as what
- * lies just outside `outer`? true = outer is a clear holder, false = outer is the
- * card edge (a border band), null = can't tell. `allSides` demands a band on every
- * side (a holder surrounds the card; an inner frame may share sides with the edge).
- */
-export function bandLooksLikeOutside(img, outer, inner, allSides = false) {
-  const band = [];
-  const outside = [];
-  const widths = [];
+    return n >= 6 ? { c: [r / n, g / n, b / n], tex: t / n } : null;
+  };
+  let sides = 0;
   for (let k = 0; k < 4; k++) {
     const o0 = outer[k];
     const o1 = outer[(k + 1) % 4];
     const i0 = inner[k];
     const i1 = inner[(k + 1) % 4];
-    const bs = [];
-    const os = [];
+    const band = [];
+    const out = [];
     let wsum = 0;
-    const N = 24;
-    for (let s = 1; s < N; s++) {
-      const f = 0.15 + (0.7 * s) / N; // skip the corners
+    const N = 40;
+    for (let s = 0; s <= N; s++) {
+      const f = 0.12 + (0.76 * s) / N; // skip the corners
       const op = { x: o0.x + (o1.x - o0.x) * f, y: o0.y + (o1.y - o0.y) * f };
       const ip = { x: i0.x + (i1.x - i0.x) * f, y: i0.y + (i1.y - i0.y) * f };
       const dx = op.x - ip.x;
@@ -553,32 +551,21 @@ export function bandLooksLikeOutside(img, outer, inner, allSides = false) {
       const bw = Math.hypot(dx, dy);
       wsum += bw;
       if (bw < 2) continue;
-      // A few pixels away from either edge so blur at the edges doesn't leak in.
-      bs.push({ x: ip.x + dx * 0.5, y: ip.y + dy * 0.5 });
-      const out = Math.max(3, Math.min(bw * 0.5, 12)) / bw;
-      os.push({ x: op.x + dx * out, y: op.y + dy * out });
+      for (const t of [0.35, 0.5, 0.65]) band.push({ x: ip.x + dx * t, y: ip.y + dy * t });
+      const step = Math.max(3, Math.min(bw * 0.5, 10)) / bw;
+      for (const t of [1, 1.5, 2]) out.push({ x: op.x + dx * step * t, y: op.y + dy * step * t });
     }
-    band.push(bs);
-    outside.push(os);
-    widths.push(wsum / (N - 1));
+    if (wsum / (N + 1) < minW) continue;
+    const bs = stats(band);
+    const os = stats(out);
+    if (!bs || !os) continue;
+    const dc = Math.hypot(bs.c[0] - os.c[0], bs.c[1] - os.c[1], bs.c[2] - os.c[2]);
+    // Through clear plastic the background looks a little lighter and softer.
+    const like = bs.tex > 4 && os.tex > 4 && bs.tex > os.tex * 0.3 && dc < 90;
+    if (!like) return false;
+    sides++;
   }
-  const bm = sideMeans(img, band);
-  const om = sideMeans(img, outside);
-  const minW = Math.max(2, 0.012 * (quadSize(outer).w + quadSize(outer).h));
-  let same = 0;
-  let differ = 0;
-  for (let k = 0; k < 4; k++) {
-    if (!bm[k] || !om[k] || widths[k] < minW) {
-      if (allSides) return null;
-      continue;
-    }
-    const d = Math.hypot(bm[k][0] - om[k][0], bm[k][1] - om[k][1], bm[k][2] - om[k][2]);
-    if (d < 40) same++;
-    else differ++;
-  }
-  if (same + differ < 2) return null;
-  if (allSides) return same >= 3 ? true : differ >= 3 ? false : null;
-  return same > differ ? true : differ > same ? false : null;
+  return sides >= 2;
 }
 
 /** Re-fit each side by least squares on the edge pixels along it (sub-pixel corners). */

@@ -153,31 +153,98 @@ function crop(src, r, targetW) {
   return c;
 }
 
-/** Grayscale + contrast stretch (1st–99th percentile), optionally inverted. */
+/**
+ * Grayscale, flatten the lighting (divide by the local background brightness, so
+ * dark text reads the same on a light border, a grey-blue name bar or next to a
+ * white sticker), then contrast stretch (1st–99th percentile). `invert` turns
+ * light-on-dark text into dark-on-light first.
+ */
 function enhance(canvas, invert = false) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const w = canvas.width;
+  const h = canvas.height;
+  const img = ctx.getImageData(0, 0, w, h);
   const d = img.data;
-  const hist = new Uint32Array(256);
-  for (let i = 0; i < d.length; i += 4) {
-    const g = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
-    d[i] = g;
-    hist[g | 0]++;
+  const g = new Float32Array(w * h);
+  for (let i = 0; i < g.length; i++) {
+    const v = (d[i * 4] * 299 + d[i * 4 + 1] * 587 + d[i * 4 + 2] * 114) / 1000;
+    g[i] = invert ? 255 - v : v;
   }
-  const n = d.length / 4;
+  flattenLight(g, w, h);
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < g.length; i++) hist[g[i] | 0]++;
+  const n = g.length;
   let lo = 0;
   let hi = 255;
   for (let acc = 0; lo < 255 && (acc += hist[lo]) < n * 0.01; lo++);
   for (let acc = 0; hi > 0 && (acc += hist[hi]) < n * 0.01; hi--);
   const range = Math.max(1, hi - lo);
-  for (let i = 0; i < d.length; i += 4) {
-    let v = ((d[i] - lo) * 255) / range;
+  for (let i = 0; i < g.length; i++) {
+    let v = ((g[i] - lo) * 255) / range;
     v = v < 0 ? 0 : v > 255 ? 255 : v;
-    if (invert) v = 255 - v;
-    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
   }
   ctx.putImageData(img, 0, 0);
   return canvas;
+}
+
+/**
+ * In place: g = 255 * g / background, where background is the brightest nearby
+ * value (block maximum, spread over neighbouring blocks and smoothed). Blocks are
+ * bigger than a letter stroke so text never counts as background.
+ */
+function flattenLight(g, w, h) {
+  const B = Math.max(16, Math.round(Math.min(w, h) / 12));
+  const bw = Math.ceil(w / B);
+  const bh = Math.ceil(h / B);
+  const bmax = new Float32Array(bw * bh);
+  for (let y = 0; y < h; y++) {
+    const r = ((y / B) | 0) * bw;
+    for (let x = 0; x < w; x++) {
+      const k = r + ((x / B) | 0);
+      if (g[y * w + x] > bmax[k]) bmax[k] = g[y * w + x];
+    }
+  }
+  const spread = (src, op) => {
+    const out = new Float32Array(bw * bh);
+    for (let y = 0; y < bh; y++) {
+      for (let x = 0; x < bw; x++) {
+        let m = 0;
+        let s = 0;
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const yy = y + dy;
+            const xx = x + dx;
+            if (yy < 0 || xx < 0 || yy >= bh || xx >= bw) continue;
+            const v = src[yy * bw + xx];
+            if (v > m) m = v;
+            s += v;
+            n++;
+          }
+        }
+        out[y * bw + x] = op === 'max' ? m : s / n;
+      }
+    }
+    return out;
+  };
+  const bg = spread(spread(bmax, 'max'), 'mean');
+  for (let y = 0; y < h; y++) {
+    const fy = Math.min(bh - 1, Math.max(0, y / B - 0.5));
+    const y0 = fy | 0;
+    const y1 = Math.min(bh - 1, y0 + 1);
+    const ty = fy - y0;
+    for (let x = 0; x < w; x++) {
+      const fx = Math.min(bw - 1, Math.max(0, x / B - 0.5));
+      const x0 = fx | 0;
+      const x1 = Math.min(bw - 1, x0 + 1);
+      const tx = fx - x0;
+      const b =
+        (bg[y0 * bw + x0] * (1 - tx) + bg[y0 * bw + x1] * tx) * (1 - ty) + (bg[y1 * bw + x0] * (1 - tx) + bg[y1 * bw + x1] * tx) * ty;
+      const v = (255 * g[y * w + x]) / Math.max(8, b);
+      g[y * w + x] = v > 255 ? 255 : v;
+    }
+  }
 }
 
 function copy(canvas) {
@@ -220,10 +287,23 @@ export async function readRegion(card, region, { psm = 11, invert = false, targe
   return recognize(worker, enhance(crop(card, region, targetW), invert), psm);
 }
 
-/** Name + bottom-line OCR of one card-shaped image. */
-async function readAreas(worker, card, onStatus) {
+/**
+ * Name + bottom-line OCR of one card-shaped image. `isKnown(name)` says whether a
+ * read is a real card name; when it isn't, the name area is read again as one
+ * block of text (sparse-text mode gets lost on some name bars).
+ */
+async function readAreas(worker, card, onStatus, isKnown) {
   onStatus?.('Reading card name…');
-  const nameRes = await recognize(worker, enhance(crop(card, NAME_REGION, 1600)), 11);
+  const nameImg = enhance(crop(card, NAME_REGION, 1600));
+  const nameRes = await recognize(worker, nameImg, 11);
+  let name = pickName(nameRes.lines);
+  let nameText = nameRes.text;
+  if (!isKnown(name.best) && !isKnown(nameRes.text)) {
+    const again = await recognize(worker, nameImg, 6);
+    nameText += `\n---block---\n${again.text}`;
+    const n2 = pickName(again.lines);
+    if (isKnown(n2.best) || isKnown(again.text) || !name.best) name = n2;
+  }
   onStatus?.('Reading card number…');
   const bottomBase = crop(card, BOTTOM_REGION, 2200);
   const b1 = await recognize(worker, enhance(copy(bottomBase)), 11);
@@ -235,7 +315,7 @@ async function readAreas(worker, card, onStatus) {
     bottomText += `\n---inverted---\n${b2.text}`;
     bottom = mergeBottom(bottom, parseBottomText(b2.text));
   }
-  return { nameLines: nameRes.lines, nameText: nameRes.text, bottom, bottomText };
+  return { name, nameText, bottom, bottomText };
 }
 
 /** Card-shaped images to read, best guess first: straightened card(s), then the picture as is. */
@@ -281,30 +361,28 @@ export async function readCard(canvas, onStatus, opts = {}) {
   debug.detect = found ? `card found (score ${found.score.toFixed(2)}, ${found.ms} ms)` : 'no card outline found';
   const views = cardViews(canvas, found);
 
-  const known = (text) => (opts.findName && text ? opts.findName(text) : undefined);
-  const isKnown = (name) => {
-    const k = known(name);
-    return k === undefined ? !!name : !!k && k.score >= 0.75;
+  const lookup = (text) => (opts.findName && text ? opts.findName(text) : undefined);
+  const isKnown = (text) => {
+    const k = lookup(text);
+    return k === undefined ? !!text : !!k && k.score >= 0.75;
   };
   let card = views[0]?.card || null;
-  let nameLines = [];
-  let nameText = '';
   let bottom = { numbers: [], setCodes: [], codeCandidates: [] };
   let name = { best: '', all: '' };
+  let nameText = '';
   for (const [i, v] of views.entries()) {
-    const r = await readAreas(worker, v.card, onStatus);
+    const r = await readAreas(worker, v.card, onStatus, isKnown);
     const label = views.length > 1 ? `[${v.how}]\n` : '';
     debug.name += (i ? '\n' : '') + label + r.nameText;
     debug.bottom += (i ? '\n' : '') + label + r.bottomText;
     bottom = mergeBottom(bottom, r.bottom);
-    const n = pickName(r.nameLines);
-    if (!isKnown(name.best) && (isKnown(n.best) || !name.best)) {
-      name = n;
-      nameLines = r.nameLines;
-      nameText = r.nameText;
+    if (!isKnown(name.best) && (isKnown(r.name.best) || !name.best)) {
+      name = r.name;
       card = v.card;
     }
-    if (bottom.numbers.length && isKnown(name.best)) break;
+    nameText += `\n${r.nameText}`;
+    // A number or a real name means this outline is the card; stop trying others.
+    if (bottom.numbers.length || isKnown(name.best) || isKnown(r.nameText)) break;
   }
 
   let fullText = '';
@@ -325,12 +403,12 @@ export async function readCard(canvas, onStatus, opts = {}) {
     }
   }
 
-  // The name area read garbage (glare, a sticker…): look for a known card name in
-  // everything we read, name area first.
-  if (opts.findName && !isKnown(name.best)) {
-    const hit = [nameText, ...nameLines.map((l) => l.text), fullText].map(known).find((k) => k && k.score >= 0.75);
-    if (hit) {
-      name.all = [name.best, name.all].filter(Boolean).join(' ');
+  // The name read is garbage (glare, a sticker…) or has extra words: use the known
+  // card name found in what we read, name area first.
+  if (opts.findName && !lookupExact(lookup, name.best)) {
+    const hit = [name.best, nameText, fullText].map(lookup).find((k) => k && k.score >= 0.75);
+    if (hit && hit.name !== name.best) {
+      if (!name.all.includes(name.best)) name.all = [name.best, name.all].filter(Boolean).join(' ');
       name.best = hit.name;
       debug.nameFrom = 'dictionary';
     }
@@ -342,6 +420,14 @@ export async function readCard(canvas, onStatus, opts = {}) {
     card,
   };
 }
+
+/** The read is (nearly) a card name all by itself, e.g. "Charizard ex" or "Charlzard ex". */
+function lookupExact(lookup, text) {
+  const k = lookup(text);
+  if (k === undefined) return true;
+  return !!k && k.score >= 0.75 && Math.abs(k.name.length - text.length) <= 2;
+}
+
 function mergeBottom(a, b) {
   const key = (n) => `${n.prefix}|${n.num}|${n.total}`;
   const seen = new Set(a.numbers.map(key));

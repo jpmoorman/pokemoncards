@@ -249,6 +249,55 @@ await page.waitForSelector('.b-empty');
 keys = await batchKeys();
 t.check('Clear all empties the batch and its storage', !keys.length && (await page.isHidden('#batch-count')), keys.join());
 
+// ---- stop, photos added mid-run, reload mid-run ----
+await page.setInputFiles('#batch-file-input', [await png(CARDS.charizardEx), await png(CARDS.baseCharizard), await png(CARDS.aurorus)]);
+await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem.waiting').length === 3);
+await page.click('#batch-process');
+await page.click('#batch-stop');
+await page.waitForSelector('#batch-process');
+got = await items();
+t.check('Stop finishes the current photo and leaves the rest waiting', got.map((i) => i.status).join() === 'matched,waiting,waiting', got.map((i) => i.status).join());
+
+// A longer run (5 waiting) so a photo added after it starts lands mid-run.
+await page.setInputFiles('#batch-file-input', [await png(CARDS.charizardEx), await png(CARDS.baseCharizard), await png(CARDS.aurorus)]);
+await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem.waiting').length === 5);
+const extra = await png(CARDS.mewtwo30th);
+await page.click('#batch-process');
+await page.setInputFiles('#batch-file-input', extra);
+await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem').length === 7);
+const midRun = !!(await page.$('#batch-stop'));
+if (midRun) {
+  await allDone(7);
+  got = await items();
+  t.check(
+    'a photo added while processing is picked up by the same run',
+    got.every((i) => i.status === 'matched') && got[6].name === 'Mewtwo ex' && got[6].price === 'No price' && !(await page.$('#batch-process')),
+    JSON.stringify(got.map((i) => [i.status, i.name, i.price])),
+  );
+} else {
+  console.log('SKIP  photo added mid-run (the run finished before the photo was saved)');
+  await page.click('#batch-process');
+  await allDone(7);
+}
+
+await page.setInputFiles('#batch-file-input', [await png(CARDS.aurorus), await png(CARDS.charizardEx)]);
+await page.waitForFunction(() => document.querySelectorAll('#batch-list .bitem.waiting').length === 2);
+await page.click('#batch-process');
+await page.waitForSelector('#batch-list .bitem.processing');
+await page.reload();
+await page.click('.tab[data-view="batch"]');
+await page.waitForSelector('#batch-list .bitem');
+got = await items();
+t.check('reload mid-run: the interrupted photo goes back to waiting', got.length === 9 && !got.some((i) => i.status === 'processing') && got[7].status === 'waiting', got.map((i) => i.status).join());
+await page.click('#batch-process');
+await allDone(9);
+got = await items();
+t.check('…and processing again finishes the batch', got.every((i) => i.status === 'matched') && got[7].name === 'Aurorus' && got[8].name === 'Charizard ex', got.map((i) => i.name).join());
+await shot(page, 'long-list');
+await page.click('#batch-clear-all');
+await page.click('.modal .btn.primary:has-text("Delete all")');
+await page.waitForSelector('.b-empty');
+
 // ---- live camera in batch mode (needs ffmpeg) ----
 let haveFfmpeg = true;
 try {
