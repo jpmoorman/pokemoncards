@@ -18,7 +18,7 @@
 //   saved    - added to the collection; traded - side it was sent to ('give' | 'get'), kept in step with Swap sides
 //   tradeKey - entryKey of its trade line when that line's version was changed on the Trade tab
 //   forTrade - side it was photographed for (Scan in "Adding cards to" mode), until it is sent
-import { $, el, emit, on, toast, actionToast, confirmDialog, navigate } from './ui.js';
+import { $, el, emit, on, toast, actionToast, confirmDialog, navigate, restack } from './ui.js';
 import { kvGet, getCard } from './api.js';
 import { fileToCanvas } from './ocr.js';
 import { identify } from './identify.js';
@@ -343,6 +343,7 @@ export async function enqueueFiles(files, { tradeSide = null } = {}) {
     }
   }
   pill?.remove();
+  restack();
   if (g !== gen) return 0; // cleared: the photos saved so far are gone too
   // One message, so the warning isn't replaced by the count.
   const msg = [
@@ -454,7 +455,12 @@ async function processAll(only) {
     if (scanDone) {
       // A scan on the Scan tab goes first (text recognition is shared); the list may change meanwhile.
       progress('Paused while your scan finishes…');
-      await scanDone;
+      // Stop works during the pause too, not only once the scan ends.
+      await new Promise((resolve) => {
+        run.wake = resolve;
+        scanDone.then(resolve);
+      });
+      run.wake = null;
       continue;
     }
     tried.add(it.id);
@@ -542,6 +548,7 @@ async function processItem(it) {
 
 function stop() {
   run.stop = true;
+  run.wake?.();
   render();
 }
 

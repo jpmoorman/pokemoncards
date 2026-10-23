@@ -1,7 +1,10 @@
 // Accuracy bench: runs real labeled photos through the same identify() the phone uses,
 // against a snapshot of the full TCGdex catalog, and scores each step.
 //
-//   node tests/bench.mjs --photos ../pokemoncards-testphotos [--limit 50] [--only base,sm] [--out results.json]
+//   node tests/bench.mjs --photos ../pokemoncards-testphotos [--limit 50] [--only base,sm] [--split dev|holdout]
+//                        [--out results.json] [--save-cards <dir>]
+// --split   use only the "dev" (tuning) or "holdout" (final check) half, same split as rank-eval.mjs
+// --save-cards  also save each straightened card as <dir>/<photo id>.jpg for fast OCR experiments
 //
 // The photo folder needs labels.json, raw/<id>.jpg and catalog/{cards,sets,set-codes}.json
 // (see the private pokemoncards-testphotos repo). Photos never leave this machine.
@@ -17,10 +20,21 @@ const dir = path.resolve(arg('photos', '../pokemoncards-testphotos'));
 const limit = parseInt(arg('limit', '0'), 10);
 const only = (arg('only', '') || '').split(',').filter(Boolean);
 const outFile = arg('out', path.join(results, 'bench.json'));
+const split = arg('split', 'all');
+const saveCards = arg('save-cards', '');
+if (saveCards) fs.mkdirSync(saveCards, { recursive: true });
+
+// Same stable split as tests/rank-eval.mjs.
+function half(id) {
+  let h = 2166136261;
+  for (const ch of id) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  return (h >>> 0) % 2 ? 'holdout' : 'dev';
+}
 
 const labels = JSON.parse(fs.readFileSync(path.join(dir, 'labels.json')))
   .filter((l) => l.tcgdexId && l.checkedBySecondLabeler)
-  .filter((l) => !only.length || only.some((o) => l.tcgdexId.startsWith(o)));
+  .filter((l) => !only.length || only.some((o) => l.tcgdexId.startsWith(o)))
+  .filter((l) => split === 'all' || half(l.id) === split);
 const todo = limit ? labels.slice(0, limit) : labels;
 const cards = fs.readFileSync(path.join(dir, 'catalog/cards.json'), 'utf8');
 const sets = fs.readFileSync(path.join(dir, 'catalog/sets.json'), 'utf8');
@@ -60,7 +74,7 @@ const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toL
 const rows = [];
 const t0 = Date.now();
 for (const [i, l] of todo.entries()) {
-  const r = await page.evaluate(async (id) => {
+  const r = await page.evaluate(async ([id, wantCard]) => {
     const { identify } = await import('/js/identify.js');
     const { fileToCanvas } = await import('/js/ocr.js');
     const blob = await (await fetch(`https://photos.local/${id}.jpg`)).blob();
@@ -86,10 +100,12 @@ for (const [i, l] of todo.entries()) {
         }
         border = [Math.round(r / n), Math.round(gg / n), Math.round(b / n)];
       }
+      const cardJpeg = wantCard && card?.width ? card.toDataURL('image/jpeg', 0.92) : null;
       return {
         clues,
         debug: { name: debug.name, bottom: debug.bottom, full: debug.full, art: debug.art, detect: debug.detect, reads: debug.reads },
         border,
+        cardJpeg,
         ms: Math.round(performance.now() - started),
         top: ranked.slice(0, 5).map((x) => x.card.id),
         score: ranked[0]?.score ?? null,
@@ -103,7 +119,9 @@ for (const [i, l] of todo.entries()) {
     } catch (e) {
       return { ms: Math.round(performance.now() - started), error: String(e?.message || e), top: [] };
     }
-  }, l.id);
+  }, [l.id, !!saveCards]);
+  if (r.cardJpeg) fs.writeFileSync(path.join(saveCards, `${l.id}.jpg`), Buffer.from(r.cardJpeg.split(',')[1], 'base64'));
+  delete r.cardJpeg;
   const row = {
     id: l.id,
     truth: l.tcgdexId,

@@ -36,6 +36,7 @@ export function actionToast(msg, label, onAction, { ms = 5000, onEnd } = {}) {
   const onclick = () => {
     tapped = true;
     t.remove();
+    restack();
     onAction();
   };
   const t = el('div', { class: 'toast toast-action', role: 'status', 'data-action': true }, el('span', {}, msg), el('button', { type: 'button', onclick }, label));
@@ -44,19 +45,30 @@ export function actionToast(msg, label, onAction, { ms = 5000, onEnd } = {}) {
   document.querySelectorAll('.toast[data-plain]').forEach(stackAbove); // a message showing now moves up
   setTimeout(() => {
     t.remove();
+    restack();
     onEnd?.(tapped);
   }, ms);
-  return { close: () => t.remove() };
+  return {
+    close: () => {
+      t.remove();
+      restack();
+    },
+  };
 }
 
 /** Raise a toast above the ones that stay on screen (Undo, View, "Saving photo…"), so none covers another. */
 function stackAbove(t) {
-  const tops = [...document.querySelectorAll('.toast:not([data-plain])')]
-    .filter((n) => n !== t)
-    .map((n) => n.getBoundingClientRect())
-    .filter((r) => r.height)
-    .map((r) => r.top);
-  t.style.bottom = tops.length ? `${Math.round(document.documentElement.clientHeight - Math.min(...tops) + 8)}px` : '';
+  // Measured from the other toasts' own bottom offsets, not the viewport height: phone browsers
+  // report a shorter clientHeight than the area fixed elements use once their toolbar hides.
+  const highest = [...document.querySelectorAll('.toast:not([data-plain])')]
+    .filter((n) => n !== t && n.offsetHeight)
+    .map((n) => parseFloat(getComputedStyle(n).bottom) + n.offsetHeight);
+  t.style.bottom = highest.length ? `${Math.round(Math.max(...highest) + 8)}px` : '';
+}
+
+/** Put plain messages back in place once a toast they were raised above has gone. */
+export function restack() {
+  document.querySelectorAll('.toast[data-plain]').forEach(stackAbove);
 }
 
 export function setStatus(target, msg, isError = false) {
