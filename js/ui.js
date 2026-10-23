@@ -31,7 +31,12 @@ export function setStatus(target, msg, isError = false) {
 
 // ---- event bus ----
 // 'card:action'  detail: { action: 'collection' | 'trade-give' | 'trade-get', card, row, entry }
-// 'app:navigate' detail: { view: 'scan' | 'batch' | 'trade' | 'search' | 'collection', hint?: string }
+// 'app:navigate' detail: { view: 'scan' | 'batch' | 'trade' | 'search' | 'collection', tradeSide?: 'give' | 'get' }
+//                 navigate('scan', { tradeSide: 'give' }) opens the scanner in "adding cards to You give" mode;
+//                 navigate('search', { tradeSide: 'get' }) does the same for Search.
+// 'batch:changed' detail: {}  (queue size changed)
+// 'sheet:closed'  detail: {}
+// 'catalog:ready' detail: {}
 // 'fx:ready'     detail: { rate, date, fallback }
 export function emit(name, detail) {
   document.dispatchEvent(new CustomEvent(name, { detail }));
@@ -43,8 +48,8 @@ export function on(name, fn) {
   return () => document.removeEventListener(name, h);
 }
 
-export function navigate(view, hint) {
-  emit('app:navigate', { view, hint });
+export function navigate(view, extra = {}) {
+  emit('app:navigate', { view, ...extra });
 }
 
 /** Simple confirm sheet that works the same on iOS and Android. Resolves true/false. */
