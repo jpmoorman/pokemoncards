@@ -18,6 +18,7 @@ import { loadCollection } from './collection.js';
 const KEY = 'trade.v1';
 const SIDES = { give: 'You give', get: 'You get' };
 const OTHER = { give: 'get', get: 'give' };
+export const MIN_RATE = 80; // lowest trade value % (defined before load() runs below)
 
 let trade = load();
 let editing = null; // { side, key } while the sheet is open on one of the trade's cards
@@ -67,8 +68,6 @@ export function evaluateTrade({ give = [], get = [], rate = 100, rateSide = 'giv
   else verdict = { kind: 'behind', text: `You'd lose ${formatMoney(-diff)}` };
   return { give: g, get: r, diff, pct: diffPct, unpriced: g.unpriced + r.unpriced, verdict };
 }
-
-export const MIN_RATE = 80;
 
 /** Trade value %: a whole number from 80 to 100. (A function declaration: load() uses it at start-up.) */
 export function clampRate(r) {
