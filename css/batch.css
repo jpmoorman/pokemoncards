@@ -81,7 +81,10 @@
   content: counter(step); display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%;
   background: var(--accent); color: var(--accent-ink); font-weight: 800;
 }
-.b-empty-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.b-empty-actions { display: grid; gap: 8px; }
+
+/* "Saving photo 3 of 12…" pill (uses .toast) */
+.b-saving { width: max-content; max-width: calc(100vw - 32px); }
 
 /* large photo viewer */
 .b-viewer .modal-panel { width: min(720px, 100%); padding: 10px; }

@@ -55,13 +55,15 @@ function changed() {
 }
 
 export function initBatch() {
-  loadP = kvGet(INDEX).then((saved) => {
-    // A photo that was mid-way when the app closed goes back in the queue.
-    items = (Array.isArray(saved) ? saved : []).filter((i) => i?.id).map((i) => (i.status === 'processing' ? { ...i, status: 'waiting' } : i));
-    loaded = true;
-    changed();
-    render();
-  });
+  loadP = kvGet(INDEX)
+    .catch(() => null)
+    .then((saved) => {
+      // A photo that was mid-way when the app closed goes back in the queue.
+      items = (Array.isArray(saved) ? saved : []).filter((i) => i?.id).map((i) => (i.status === 'processing' ? { ...i, status: 'waiting' } : i));
+      loaded = true;
+      changed();
+      render();
+    });
   on('sheet:closed', () => (reviewing = null));
   on('card:action', ({ action, entry }) => {
     // "Add to collection" tapped in a review sheet: remember it so "Add all" won't add it twice.
@@ -265,34 +267,38 @@ async function keepAwake(yes) {
   // Keep the screen on while a long batch runs (a locked phone pauses the page).
   try {
     if (yes && !wakeLock && navigator.wakeLock) {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => (wakeLock = null));
+      const lock = await navigator.wakeLock.request('screen');
+      lock.addEventListener('release', () => wakeLock === lock && (wakeLock = null));
+      if (run.active) wakeLock = lock;
+      else lock.release(); // the run ended while we waited
     } else if (!yes && wakeLock) {
-      await wakeLock.release();
+      const lock = wakeLock;
+      wakeLock = null;
+      await lock.release();
     }
   } catch {
     /* not supported or not allowed */
   }
 }
 
-/** Identify photos strictly one at a time (text recognition is CPU heavy). */
+/**
+ * Identify waiting photos (or just `only`) strictly one at a time: text recognition is CPU heavy.
+ * Photos added while it runs are picked up too; each photo is tried once per run.
+ */
 async function processAll(only) {
   if (run.active) return;
-  const todo = only ? [only] : items.filter(isPending);
-  if (!todo.length) return;
-  Object.assign(run, { active: true, stop: false, index: 0, total: todo.length, msg: '' });
+  const tried = new Set();
+  const untried = () => (only ? [only] : items).filter((i) => items.includes(i) && isPending(i) && !tried.has(i.id));
+  if (!untried().length) return;
+  Object.assign(run, { active: true, stop: false, index: 0, total: untried().length, msg: '' });
   keepAwake(true);
-  render();
   const before = new Set(items.filter(needsCheck).map((i) => i.id));
   let found = 0;
   let failed = 0;
-  for (const it of todo) {
-    if (run.stop) break;
-    if (!items.includes(it) || !isPending(it)) {
-      run.total--;
-      continue;
-    }
-    run.index++;
+  for (let it = untried()[0]; it && !run.stop; it = untried()[0]) {
+    tried.add(it.id);
+    run.index = tried.size;
+    run.total = tried.size + untried().length;
     await processItem(it);
     if (!items.includes(it)) continue; // deleted meanwhile
     if (it.status === 'matched') found++;
@@ -305,6 +311,7 @@ async function processAll(only) {
   Object.assign(run, { active: false, stop: false, msg: '' });
   keepAwake(false);
   render();
+  if (!items.length) return; // cleared while running
   const check = items.filter((i) => needsCheck(i) && !before.has(i.id)).length;
   const parts = [`${found} identified`, check && `${check} to check`, failed && `${failed} failed`].filter(Boolean);
   toast(`${stopped ? 'Stopped' : 'Done'}: ${parts.join(', ')}`, 3000);
