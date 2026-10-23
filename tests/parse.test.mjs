@@ -22,6 +22,11 @@ test('number with letters around it or the rarity mark read as a digit', () => {
   assert.deepEqual(read('B3E-83J-W7B ©2006 Pokémon 12/1014'), ['12/101']);
 });
 
+test('a zero-padded number with its slash read as a comma and a 0 as a letter', () => {
+  assert.deepEqual(read('ID Q24, 086 *'), ['024/086']);
+  assert.deepEqual(read('J Td 024.088 »'), ['024/088']);
+});
+
 test('a known set size comes first', () => {
   // "11/039" is no real number: the mangled one with a real set size goes first.
   assert.deepEqual(read('11/039 kk udo\n1997165'), ['199/165', '11/039']);

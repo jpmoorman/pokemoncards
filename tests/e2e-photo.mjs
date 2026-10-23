@@ -272,10 +272,11 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
   t.check(`phone-size photo with no card gives up in ${rb.seconds}s: ${rb.reads} OCR passes, none over 2.6 megapixels (${rb.megapixels})`, rb.reads <= 3 && rb.megapixels <= 2.6, JSON.stringify(rb));
   // An upright card whose name and number can't be read (a sticker over the name, no
   // number printed): after the card's own areas, the whole photo is read shrunk too (it
-  // was read at full size, 3 megapixels here).
+  // was read at full size, 3 megapixels here). The number areas read nothing, so their
+  // number spots are read too, for black and for white text (two small passes).
   const covered = await makePhoto(page, { ...CARDS.charizardEx, bottomLeft: 'G  OBF EN' }, { ...PHOTOS.flat, sticker: 'name' });
   const rc = await identifyIn(covered.buffer);
-  t.check(`card with its name and number covered gives up in ${rc.reads} OCR passes, none over 2 megapixels (${rc.megapixels}, ${rc.seconds}s)`, rc.reads <= 10 && rc.megapixels <= 2.1, JSON.stringify(rc));
+  t.check(`card with its name and number covered gives up in ${rc.reads} OCR passes, none over 2 megapixels (${rc.megapixels}, ${rc.seconds}s)`, rc.reads <= 11 && rc.megapixels <= 2.1, JSON.stringify(rc));
   const photo = await makePhoto(page, CARDS.mewtwo30th, PHOTOS.flat);
   const m = await identifyIn(photo.buffer);
   t.check('"Finding the card…" is shown before the card is looked for', m.id === '30th-157' && m.painted.includes('Finding the card…'), JSON.stringify(m));
@@ -339,6 +340,38 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
     const what = `camera guide crop${k < 1 ? `, card ${Math.round(k * 97)}% of the guide` : ''}${upsideDown ? ', card upside down,' : ''}`;
     t.check(`${what} is read in ${r.reads} OCR passes`, r.id === 'sv03-125' && r.reads <= max && !r.statuses.includes('Finding the card…'), JSON.stringify(r));
   }
+}
+
+// 7b) Full-art cards print the number in white on dark artwork: it is read too, in a
+// bounded number of passes.
+{
+  const plain = await makeCard(page, { ...CARDS.charizardEx, bottomLeft: '' });
+  const png = await page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const c = document.createElement('canvas');
+    [c.width, c.height] = [img.width, img.height];
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0);
+    g.scale(c.width / 630, c.height / 880);
+    // Dark artwork behind the bottom line, the number in white with a dark outline.
+    const art = g.createLinearGradient(0, 790, 630, 860);
+    art.addColorStop(0, '#2a1d3f');
+    art.addColorStop(1, '#4b2d2a');
+    g.fillStyle = art;
+    g.fillRect(22, 790, 586, 68);
+    g.font = 'italic bold 17px sans-serif';
+    g.lineWidth = 3;
+    g.strokeStyle = '#111';
+    g.fillStyle = '#fff';
+    g.strokeText('G  OBF EN  125/197 ★', 50, 840);
+    g.fillText('G  OBF EN  125/197 ★', 50, 840);
+    return c.toDataURL('image/png').split(',')[1];
+  }, plain.toString('base64'));
+  const photo = await makePhoto(page, CARDS.charizardEx, { ...PHOTOS.flat, cardImage: Buffer.from(png, 'base64') });
+  const r = await identifyIn(photo.buffer);
+  t.check(`a full-art card's white number is read (${r.number}, ${r.reads} OCR passes)`, r.id === 'sv03-125' && r.number === '125/197' && r.reads <= 6, JSON.stringify(r));
 }
 
 // 8) Two scans at once (Batch processing while scanning a card): every read keeps its

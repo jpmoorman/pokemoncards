@@ -43,28 +43,31 @@ function looseNumbers(t, totals, max = 2) {
     const pre = t.slice(Math.max(0, m.index - 4), m.index);
     if (/(#|N[oO0]\.?\s*|L[vV]\.?\s*|HP\s*|[-+×©])$/.test(pre) || /^\s*(lbs|HP|[+×,-])/.test(t.slice(m.index + s.length))) continue;
     for (let i = 1; i < s.length; i++) {
+      // The set size: 3 digits, or 2 (modern sets print "088" for 88, which reads either way).
       for (const len of [3, 2]) {
-        // ("088" for 88: modern sets print the size zero-padded to three digits.)
         const tot = s.slice(i, i + len);
         if (tot.length < len || !/^\d+$/.test(tot) || !totals.has(parseInt(tot, 10))) continue;
         // After the size: nothing, or the rarity mark read as a character or a few.
         const after = s.length - (i + len);
         const sep = s[i - 1];
-        let raw;
-        if (sep === '/' && after <= 2) raw = s.slice(0, i - 1).slice(-len);
+        // The number before it: with the slash read, or (3 digits only) the slash read as 7,
+        // 1, l, I or | ("1837165"), or lost ("105123").
+        let raw = '';
+        let how = 0;
+        if (sep === '/' && after <= 2) [raw, how] = [s.slice(0, i - 1).slice(-len), 4];
         else if (len === 3 && after <= 3) {
-          // No slash read: only a 3-digit number, its slash lost or read as 7, 1, l, I or |.
-          const lost = s.slice(Math.max(0, i - 3), i);
           const misread = /[71lI|]/.test(sep) ? s.slice(Math.max(0, i - 4), i - 1) : '';
-          raw = [misread, lost].find((x) => x.length === 3 && /^\d+$/.test(fixDigits(x)) && /\d{2}/.test(x));
+          const lost = s.slice(Math.max(0, i - 3), i);
+          [raw, how] = [[misread, 1], [lost, 0]].find(([x]) => x.length === 3 && /^\d+$/.test(fixDigits(x)) && /\d{2}/.test(x)) || [''];
         }
-        if (!raw || (sep !== '/' && !/\d/.test(raw))) continue;
+        // Letters alone pass for digits only before a slash that was read ("IS/111").
+        if (!raw || (how < 4 && !/\d/.test(raw))) continue;
         const num = parseInt(fixDigits(raw), 10);
         const total = parseInt(tot, 10);
         // Secret rares run past the set size, but not by much without a slash to tell.
-        if (!(num > 0 && num <= total + 150 && (sep === '/' || num <= total * 1.6))) continue;
-        // A read slash first, then the misread one, then a 3-digit size with less after it.
-        found.push({ raw, tot, score: (sep === '/' ? 4 : /[71lI|]/.test(sep) && raw !== s.slice(i - 3, i) ? 1 : 0) + len - after / 2 });
+        if (!(num > 0 && num <= total + 150 && (how === 4 || num <= total * 1.6))) continue;
+        // A read slash first, then a misread one, a 3-digit size, little after it.
+        found.push({ raw, tot, score: how + len - after / 2 });
       }
     }
   }
@@ -123,8 +126,10 @@ export function parseBottomText(text, { totals } = {}) {
   if (!numbers.length) {
     const looseRe = /(?<![0-9])(\d{1,3})\s*[|\\lI]\s*(\d{2,3})(?![0-9])/g;
     for (const m of t.matchAll(looseRe)) push('', m[1], m[2]);
-    // ...or as "," / "." in a zero-padded modern number ("024,088").
-    for (const m of t.matchAll(/(?<![0-9])(\d{3})\s?[,.]\s?(\d{3})(?![0-9])/g)) push('', m[1], m[2]);
+    // ...or as "," / "." in a zero-padded modern number ("024,088", "Q24, 088").
+    for (const m of t.matchAll(/(?<![0-9])([0-9OQD]{3})\s?[,.]\s?([0-9OQD]{3})(?![0-9])/g)) {
+      if (/\d\d/.test(m[1].replace(/\D/g, '')) && /\d\d/.test(m[2].replace(/\D/g, ''))) push('', m[1], m[2]);
+    }
   }
 
   // Set codes printed on Scarlet & Violet / Mega Evolution era cards: "OBF EN".
