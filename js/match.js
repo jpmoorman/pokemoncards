@@ -250,3 +250,121 @@ export function manualSearch(index, nameQuery, numberQuery, setAbbr = {}, setId 
   }
   return ranked.slice(0, 120);
 }
+
+// ---------- dictionary name lookup ----------
+// Finds known card names inside noisy OCR text (e.g. the whole card read when the
+// name area was hidden by glare). A bigram "diagonal" filter keeps it fast across
+// every card name; only promising spots get the exact Dice comparison.
+
+const gramCode = (s, i) => {
+  const a = s.charCodeAt(i);
+  const b = s.charCodeAt(i + 1);
+  return (a >= 97 ? a - 97 : a - 22) * 36 + (b >= 97 ? b - 97 : b - 22); // a-z -> 0-25, 0-9 -> 26-35
+};
+
+/** Levenshtein distance, giving up (returns max + 1) once it exceeds `max`. */
+export function editDistance(a, b, max = Infinity) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (cur[j] < rowMin) rowMin = cur[j];
+    }
+    if (rowMin > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+const nameTables = new WeakMap();
+function nameTable(index) {
+  let t = nameTables.get(index);
+  if (!t) {
+    t = [];
+    for (const [key, group] of index.byName) {
+      if (key.length < 3) continue;
+      const grams = new Uint16Array(key.length - 1);
+      for (let i = 0; i < key.length - 1; i++) grams[i] = gramCode(key, i);
+      t.push({ key, name: group.name, words: normalize(group.name), grams });
+    }
+    nameTables.set(index, t);
+  }
+  return t;
+}
+
+/**
+ * Known card names that appear (fuzzily) in `text`, best first:
+ * [{ name, score (0..1 similarity), pos (0..1 where in the text) }].
+ * Names of 4 letters or fewer must appear as a whole word. Names right after
+ * "Evolves from" are skipped (that's the previous stage, not this card).
+ */
+export function findNamesInText(index, text, { limit = 5, minScore = 0.75 } = {}) {
+  const t = compact(text);
+  if (t.length < 3 || !index?.byName) return [];
+  // Text bigram positions, bucketed by code (CSR layout).
+  const n = t.length - 1;
+  const count = new Int32Array(36 * 36 + 1);
+  const codes = new Uint16Array(n);
+  for (let i = 0; i < n; i++) count[(codes[i] = gramCode(t, i)) + 1]++;
+  for (let i = 1; i < count.length; i++) count[i] += count[i - 1];
+  const pos = new Int32Array(n);
+  const fill = count.slice();
+  for (let i = 0; i < n; i++) pos[fill[codes[i]]++] = i;
+  const words = ` ${normalize(text)} `;
+  const evolves = (at) => {
+    const before = t.slice(Math.max(0, at - 12), at);
+    return before.includes('from') || dice('evolvesfrom', before.slice(-11)) >= 0.6;
+  };
+
+  const found = [];
+  const diags = [];
+  for (const entry of nameTable(index)) {
+    const { key, grams } = entry;
+    const L = key.length;
+    if (L <= 4) {
+      const at = words.indexOf(` ${entry.words} `);
+      if (at >= 0) {
+        const cAt = compact(words.slice(0, at)).length;
+        if (!evolves(cAt)) found.push({ name: entry.name, score: 1, pos: cAt / t.length, len: L });
+      }
+      continue;
+    }
+    const edits = L >= 12 ? 2 : L >= 6 ? 1 : 0;
+    const need = Math.max(2, Math.min(Math.ceil(0.75 * (L - 1)), L - 1 - 2 * edits));
+    // Each shared bigram votes for an alignment (text position - name position).
+    diags.length = 0;
+    for (let i = 0; i < grams.length; i++) {
+      for (let k = count[grams[i]]; k < count[grams[i] + 1]; k++) diags.push(pos[k] - i);
+    }
+    if (diags.length < need) continue;
+    diags.sort((a, b) => a - b);
+    let best = null;
+    for (let a = 0, b = 0; b < diags.length; b++) {
+      while (diags[b] - diags[a] > 2) a++;
+      // Window of alignments within ±2 (OCR adds/drops a letter or two).
+      if (b - a + 1 < need || (b + 1 < diags.length && diags[b + 1] - diags[a] <= 2)) continue;
+      const start = diags[a];
+      for (let s = start - 1; s <= diags[b] + 1; s++) {
+        for (let w = L - 1; w <= L + 1; w++) {
+          if (s < 0 || s + w > t.length) continue;
+          const win = t.slice(s, s + w);
+          let d = dice(key, win);
+          // One wrong letter costs two bigrams; allow a letter or two by edit distance.
+          if (edits && d < 1) {
+            const e = editDistance(key, win, edits);
+            if (e <= edits) d = Math.max(d, 1 - e / L);
+          }
+          if (d >= minScore && (!best || d > best.score) && !evolves(s)) best = { name: entry.name, score: d, pos: s / t.length, len: L };
+        }
+      }
+    }
+    if (best) found.push(best);
+  }
+  // Better match first; then earlier in the text (the name is printed at the top),
+  // then longer names ("Charizard ex" over "Charizard").
+  found.sort((a, b) => b.score - 0.1 * b.pos - (a.score - 0.1 * a.pos) || b.len - a.len);
+  return found.slice(0, limit).map(({ name, score, pos }) => ({ name, score, pos }));
+}

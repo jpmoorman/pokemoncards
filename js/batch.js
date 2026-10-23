@@ -589,14 +589,16 @@ function counts() {
   return c;
 }
 
+// One input, moved into whichever "Add photos" button is on screen (a <label>, which iOS handles best).
 let fileInput = null;
-function addPhotosButton(label, cls = 'btn') {
+function addPhotosButton(label) {
   if (!fileInput) {
     fileInput = el('input', {
       type: 'file',
       accept: 'image/*',
       multiple: true,
       hidden: true,
+      id: 'batch-file-input',
       onchange: async (e) => {
         const files = [...(e.target.files || [])];
         e.target.value = '';
@@ -606,7 +608,7 @@ function addPhotosButton(label, cls = 'btn') {
       },
     });
   }
-  return el('button', { class: cls, type: 'button', onclick: () => fileInput.click() }, label);
+  return el('label', { class: 'btn', id: 'batch-add-photos' }, label, fileInput);
 }
 
 function startBatchScanning() {
@@ -766,7 +768,7 @@ export function renderBatch() {
     return;
   }
   const c = counts();
-  view.replaceChildren(
+  const parts = [
     stats(c),
     runBox(c),
     bulkActions(c),
@@ -777,5 +779,6 @@ export function renderBatch() {
       el('button', { class: 'btn small subtle', id: 'batch-clear-done', type: 'button', disabled: !c.matched, onclick: clearDone }, 'Clear done'),
       el('button', { class: 'btn small subtle', id: 'batch-clear-all', type: 'button', onclick: clearAll }, 'Clear all'),
     ),
-  );
+  ];
+  view.replaceChildren(...parts.filter(Boolean));
 }
