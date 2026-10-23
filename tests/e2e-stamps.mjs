@@ -30,7 +30,8 @@ async function scan(buf, label, mimeType = 'image/png') {
   await page.setInputFiles('#file-input-library', { name: `${label}.${mimeType === 'image/png' ? 'png' : 'jpg'}`, mimeType, buffer: buf });
   try {
     await page.waitForSelector('#sheet:not([hidden]) .detail-name', { timeout: 120000 });
-    await page.waitForFunction(() => document.querySelector('.headline-price')?.textContent.trim(), null, { timeout: 20000 });
+    // A scan's artwork is read for stamps once the sheet shows a card that comes stamped.
+    await page.waitForFunction(() => document.querySelector('.headline-price')?.textContent.trim() && !document.querySelector('.variant-reason.checking'), null, { timeout: 20000 });
   } catch {
     console.log(h.logs.slice(-20).join('\n'));
     console.log('status:', await page.textContent('#scan-status'));
@@ -75,6 +76,15 @@ for (const c of flat) {
   const got = await scan(await makeStampedCard(page, CARDS.aurorus, null), 'no-stamp');
   const ok = got.version === 'Holo' && got.price === '$0.15' && !got.found && /also comes as Set Logo Stamp/.test(got.reason);
   t.check(`no stamp keeps Holo $0.15 and mentions the stamped version (${got.seconds}s)`, ok, summary(got));
+}
+
+// 2b) A scan from the app reads the artwork only once the sheet shows a card that comes
+// stamped (it takes about a second on a phone): never for Mewtwo ex 30th, printed unstamped.
+{
+  const log = await page.evaluate(() => window.__ocrLog.length);
+  const got = await scan(await makeStampedCard(page, CARDS.mewtwo30th, null), 'never-stamped');
+  const reads = await page.evaluate((n) => window.__ocrLog.slice(n).filter((m) => m === 'R').length, log);
+  t.check(`a card never printed with a stamp: no artwork read (${reads} OCR passes)`, got.name === 'Mewtwo ex' && !got.art && !got.reason && reads <= 3, `${summary(got)} reads=${reads}`);
 }
 
 // 3) Phone photos of the stamped card: toploader + sticker + glare, turned, steep.
@@ -191,7 +201,7 @@ for (const setup of ['toploader', 'turned', 'steep']) {
   await page.waitForFunction(() => /215\//.test(document.querySelector('.detail-meta')?.textContent || '') && document.querySelector('.headline-price')?.textContent.trim(), null, { timeout: 120000 });
   const first = await page.evaluate(() => document.querySelector('.variant-chips .chip.active')?.firstChild?.textContent || document.querySelector('.detail-meta')?.textContent);
   await page.evaluate(() => [...document.querySelectorAll('#alternates .tile')].find((t) => /125\/197/.test(t.textContent))?.click());
-  await page.waitForFunction(() => /125\//.test(document.querySelector('.detail-meta')?.textContent || '') && document.querySelector('.headline-price')?.textContent.trim(), null, { timeout: 20000 });
+  await page.waitForFunction(() => /125\//.test(document.querySelector('.detail-meta')?.textContent || '') && document.querySelector('.headline-price')?.textContent.trim() && !document.querySelector('.variant-reason.checking'), null, { timeout: 20000 });
   const picked = await page.evaluate(() => ({
     version: document.querySelector('.variant-chips .chip.active')?.firstChild?.textContent,
     reason: document.querySelector('.variant-reason')?.textContent || '',

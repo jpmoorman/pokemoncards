@@ -6,6 +6,7 @@ import { variantPrices, headlinePrice, formatMoney, marketLinks, printedNumber, 
 import { catalog, catalogReady, abbrReady } from './catalog.js';
 import { setPickerValue } from './setpicker.js';
 import { pickVariant } from './stamps.js';
+import { readStamps, nextPaint } from './ocr.js';
 import { cardTile } from './components.js';
 import { makeEntry } from './entry.js';
 import { fx } from './fx.js';
@@ -15,7 +16,27 @@ const sheet = {
   current: null, // { card, rows, rowIdx }
   opts: {}, // see showResults
   clues: null,
+  debug: null,
 };
+
+// The artwork of a live scan's card is read for stamps only once a card shown comes in
+// stamped versions (a second on a phone): one read per scanned card, kept for the
+// alternates and re-matches of the same scan. canvas -> { text: string|null, read: Promise }.
+const artReads = new WeakMap();
+function artwork(canvas) {
+  let a = artReads.get(canvas);
+  if (!a) {
+    a = { text: null };
+    a.read = readStamps(canvas)
+      .catch((e) => {
+        console.warn('artwork read failed', e);
+        return '';
+      })
+      .then((text) => (a.text = text));
+    artReads.set(canvas, a);
+  }
+  return a;
+}
 
 export function initSheet() {
   $$('#sheet [data-close]').forEach((b) => b.addEventListener('click', closeSheet));
@@ -83,14 +104,18 @@ export function closeSheet() {
  *   ranked - [{ card, set }] best first (may be empty)
  *   clues  - what OCR read (null hides the "what the camera read" box)
  *   debug  - raw OCR text (null hides it)
- *   opts   - { onPick(card, row), pickLabel, preferred, tradeSide, owner }
+ *   opts   - { onPick(card, row), pickLabel, preferred, tradeSide, owner, canvas }
  *            onPick adds a primary "Use this card" button (batch review).
+ *            canvas is the scanned card (identify's `card`) when its artwork wasn't read
+ *            yet (clues.artText empty): it is read for stamps when a card shown has
+ *            stamped versions, and the version picked again.
  *            owner is any token naming who opened the sheet; it comes back as detail.owner
  *            in 'card:action' and 'sheet:closed', so a view only acts on its own sheet.
  */
 export function showResults(ranked, clues, debug, opts = {}) {
   sheet.opts = opts;
   sheet.clues = clues;
+  sheet.debug = debug;
   openSheet();
   $('#sheet .sheet-panel').scrollTop = 0;
   $('#detected').hidden = !clues;
@@ -105,15 +130,7 @@ export function showResults(ranked, clues, debug, opts = {}) {
     confEl.textContent = { high: 'Confident match', medium: 'Likely match', low: 'Unsure — check below', none: 'No match' }[conf];
   }
 
-  if (debug) {
-    $('#debug-wrap').hidden = false;
-    $('#debug').textContent = Object.entries({ 'CARD OUTLINE': debug.detect, 'NAME AREA': debug.name, 'BOTTOM AREA': debug.bottom, ARTWORK: debug.art, 'WHOLE CARD': debug.full })
-      .filter(([, v]) => v)
-      .map(([k, v]) => `${k}:\n${v}`)
-      .join('\n\n');
-  } else {
-    $('#debug-wrap').hidden = true;
-  }
+  renderDebug();
 
   const detail = $('#card-detail');
   detail.replaceChildren();
@@ -136,10 +153,21 @@ export function showResults(ranked, clues, debug, opts = {}) {
   $('#alternates').replaceChildren(...alts.map((r) => cardTile(r, () => showCard(r.card.id, { ...opts, clues, scroll: true }))));
 }
 
+function renderDebug() {
+  const { debug } = sheet;
+  $('#debug-wrap').hidden = !debug;
+  if (!debug) return;
+  $('#debug').textContent = Object.entries({ 'CARD OUTLINE': debug.detect, 'NAME AREA': debug.name, 'BOTTOM AREA': debug.bottom, ARTWORK: debug.art, 'WHOLE CARD': debug.full })
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}:\n${v}`)
+    .join('\n\n');
+}
+
 /** Open the sheet on one card (from search, collection, trade…). opts as showResults plus { preferred }. */
 export function openCard(id, opts = {}) {
   sheet.opts = opts;
   sheet.clues = null;
+  sheet.debug = null;
   openSheet();
   $('#sheet .sheet-panel').scrollTop = 0; // the panel keeps the last sheet's scroll position
   $('#detected').hidden = true;
@@ -164,8 +192,29 @@ async function showCard(id, opts = {}) {
     return;
   }
   const rows = variantPrices(card);
-  const pick = pickVariant(rows, { card, clues: opts.clues || null, preferred: opts.preferred });
-  sheet.current = { card, rows, rowIdx: pick.index, pick };
+  const clues = opts.clues || null;
+  const read = opts.canvas && artReads.get(opts.canvas);
+  if (clues && !clues.artText && read?.text != null) clues.artText = read.text;
+  // A live scan's artwork is read only now, for a card that comes stamped.
+  const checking = !!(clues && !clues.artText && opts.canvas && rows.some((r) => r.size === 'standard' && r.stamps?.length));
+  const pick = pickVariant(rows, { card, clues, preferred: opts.preferred });
+  const cur = { card, rows, rowIdx: pick.index, pick, checking };
+  sheet.current = cur;
+  renderDetail();
+  if (!checking) return;
+  await nextPaint(); // show the card first: the read starts with a long image clean-up
+  if (sheet.current !== cur) return; // another card is shown now (it reads the artwork if it needs to)
+  const text = await artwork(opts.canvas).read;
+  clues.artText ||= text;
+  if (sheet.clues === clues && sheet.debug && !sheet.debug.art) {
+    sheet.debug.art = text;
+    renderDebug();
+  }
+  if (sheet.current !== cur) return; // another card is shown now
+  const again = pickVariant(rows, { card, clues, preferred: opts.preferred });
+  // Keep a version the user picked meanwhile.
+  if (cur.rowIdx === pick.index) cur.rowIdx = again.index;
+  Object.assign(cur, { pick: again, checking: false });
   renderDetail();
 }
 
@@ -239,8 +288,9 @@ function renderDetail() {
   });
   if (!rows.length) chips.append(el('span', { class: 'muted small' }, 'No version data for this card.'));
   // Why this version: a stamp spotted on the card, or stamped versions worth checking.
-  const pick = sheet.current.pick;
-  if (pick?.reason && rowIdx === pick.index) chips.after(el('p', { class: `small variant-reason${pick.stamps.length ? ' found' : ''}` }, pick.reason));
+  const { pick, checking } = sheet.current;
+  if (checking) chips.after(el('p', { class: 'small variant-reason checking' }, 'Checking the card for a stamp or set logo…'));
+  else if (pick?.reason && rowIdx === pick.index) chips.after(el('p', { class: `small variant-reason${pick.stamps.length ? ' found' : ''}` }, pick.reason));
 
   // Price tables, all USD.
   const tables = $('.price-tables', node);
@@ -279,7 +329,7 @@ function renderDetail() {
     a(links.pricecharting, 'Graded (PriceCharting) ↗'),
   );
 
-  // Actions.
+  // Actions (until the stamp check is done, the version may still change).
   const actions = $('.actions', node);
   const act = (action, label, primary) =>
     el(
@@ -287,6 +337,7 @@ function renderDetail() {
       {
         class: `btn${primary ? ' primary' : ''}`,
         type: 'button',
+        disabled: checking,
         onclick: () => {
           const entry = makeEntry(card, row);
           // Listeners may set detail.toast to describe what they actually did.
@@ -306,6 +357,7 @@ function renderDetail() {
         {
           class: 'btn primary wide',
           type: 'button',
+          disabled: checking,
           onclick: () => {
             sheet.opts.onPick(card, row);
             closeSheet();

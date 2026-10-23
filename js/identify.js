@@ -17,10 +17,14 @@ const DETAILS_WAIT_AFTER = 150; // at least, after the artwork: copies saved on 
  * Returns { ranked: [{ card, set, score, reasons }], clues, debug, card, border } where
  * `card` is the straightened card canvas (null if no card was found), see ocr.readCard,
  * and `border` the average colour of its edge ([r, g, b] or null).
+ *   opts.stamps (default true): also read the artwork for stamps (clues.artText), which
+ *     only tells versions apart and takes about a second on a phone. A live scan passes
+ *     false and keeps `card`: the result sheet reads it when a card shown comes stamped.
  * Never waits long for the network beyond the card list: the best few candidates' details
- * are looked up while the artwork is read, and skipped if they don't come in time (offline).
+ * are looked up (while the artwork is read, if it is), and skipped if they don't come in
+ * time (offline).
  */
-export async function identify(canvas, onStatus) {
+export async function identify(canvas, onStatus, { stamps = true } = {}) {
   onStatus?.('Loading text recognition…');
   const ready = catalogReady();
   ready.catch(() => {}); // reported below, after reading
@@ -47,7 +51,7 @@ export async function identify(canvas, onStatus) {
   for (const id of lookupIds(first, { clues, debug, border }, ctx)) getCard(id).catch(() => {});
   // Stamps (set logo, 1st Edition, Play! Pokémon…) tell versions apart. Read whatever the
   // best match is: the user may pick another match (or re-match) that has stamped versions.
-  if (card) {
+  if (card && stamps) {
     onStatus?.('Checking for stamps…');
     try {
       clues.artText = await readStamps(card);

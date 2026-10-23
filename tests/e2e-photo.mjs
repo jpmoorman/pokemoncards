@@ -286,7 +286,7 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
 }
 
 // 7) Camera guide crops: a card filling the guide is read as is (name + number + stamp
-// area, no "Finding the card…" wait); upside down in the guide still reads. A card held
+// area, no "Finding the card…" step); upside down in the guide still reads. A card held
 // further away, filling 65% of the guide's width, is straightened first instead of
 // being read as is, turned around and only then looked for (9 passes).
 {

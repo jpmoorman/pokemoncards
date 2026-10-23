@@ -301,7 +301,7 @@ function turnAround(canvas) {
 }
 
 /** Let the browser paint the latest status before a long synchronous step. */
-function nextPaint() {
+export function nextPaint() {
   if (typeof document === 'undefined' || document.hidden) return Promise.resolve();
   // requestAnimationFrame waits while the page is hidden: the timeout covers that.
   return new Promise((resolve) => {
@@ -522,7 +522,8 @@ function plan(canvas, guide, found) {
  *     name inside OCR text; undefined means "can't tell" (catalog not loaded yet).
  * Returns {
  *   clues: { nameBest, nameAll, numbers, setCodes, codeCandidates, artText: '' },
- *          artText is for readStamps(card) to fill in (identify.js does for every card read)
+ *          artText is for readStamps(card) to fill in (identify.js, or the result sheet
+ *          for a live scan once a card shown comes stamped)
  *   debug: { name, bottom, full, detect, reads, steps } raw OCR text per area, how the card
  *          was found, how many OCR passes it took and what was read in which order,
  *   card:  the card as read, as a canvas: straightened (portrait, ~600–1000 px wide, 1.5%
@@ -560,13 +561,15 @@ export async function readCard(canvas, onStatus, opts = {}) {
   const upright = (r) => clear(r.n) || (r.n.conf >= UPRIGHT.name && r.b.conf >= UPRIGHT.bottom);
 
   const guide = guideCrops.has(canvas);
+  // Show that the tap was taken before the first long step (a guide crop is mostly card:
+  // it is looked for quickly, on a small copy).
+  onStatus?.(guide ? 'Reading card…' : 'Finding the card…');
+  await nextPaint();
   let found = null;
   if (guide) {
     found = findCard(canvas, { detectSize: GUIDE_DETECT_SIZE });
     debug.detect = `camera guide crop, ${describe(found)}`;
   } else {
-    onStatus?.('Finding the card…');
-    await nextPaint();
     found = findCard(canvas);
     debug.detect = describe(found);
   }

@@ -251,9 +251,10 @@ async function runScan(canvas) {
   $('#guide').classList.add('busy');
   $('#btn-scan').disabled = true;
   try {
-    const { ranked, clues, debug } = await identify(canvas, (m) => setStatus('#scan-status', m));
+    // The artwork (stamps) is read by the result sheet, and only for a card that comes stamped.
+    const { ranked, clues, debug, card } = await identify(canvas, (m) => setStatus('#scan-status', m), { stamps: false });
     setStatus('#scan-status', '');
-    deliver({ ranked, clues, debug, opts });
+    deliver({ ranked, clues, debug, opts: { ...opts, canvas: card } });
   } catch (e) {
     console.error(e);
     setStatus('#scan-status', `Scan failed: ${e.message}`, true);
