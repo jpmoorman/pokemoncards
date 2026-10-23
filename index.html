@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Card Scanner</title>
+  <meta name="description" content="Scan Pokémon cards with your phone camera and look up TCGplayer, Cardmarket and eBay prices." />
+  <meta name="theme-color" content="#14161c" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Card Scanner" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Card Scanner</h1>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-view="scan" role="tab">Scan</button>
+      <button class="tab" data-view="search" role="tab">Search</button>
+      <button class="tab" data-view="collection" role="tab">Collection <span id="collection-count" class="badge" hidden></span></button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- SCAN -->
+    <section id="view-scan" class="view active">
+      <div class="camera" id="camera">
+        <video id="video" playsinline muted autoplay></video>
+        <div class="guide-wrap"><div class="guide" id="guide"><span class="guide-hint">Fill this frame with the card</span></div></div>
+        <div class="camera-off" id="camera-off">
+          <p>Point your camera at a card.</p>
+          <button class="btn primary" id="btn-start-camera">Start camera</button>
+          <p class="muted small">Or tap <b>Photo</b> to use your camera app or a saved picture.</p>
+        </div>
+      </div>
+      <div class="scan-controls">
+        <label class="btn" id="btn-photo">
+          Photo
+          <input type="file" accept="image/*" capture="environment" id="file-input" hidden />
+        </label>
+        <button class="btn shutter" id="btn-scan" aria-label="Scan card" disabled><span></span></button>
+        <button class="btn" id="btn-torch" hidden>Light</button>
+        <label class="btn" title="Choose an existing picture">
+          Library
+          <input type="file" accept="image/*" id="file-input-library" hidden />
+        </label>
+      </div>
+      <p class="status" id="scan-status" aria-live="polite"></p>
+    </section>
+
+    <!-- SEARCH -->
+    <section id="view-search" class="view">
+      <form class="search-form" id="search-form" autocomplete="off">
+        <input type="search" id="q-name" placeholder="Card name, e.g. Charizard ex" enterkeyhint="search" />
+        <input type="text" id="q-number" placeholder="No. e.g. 125/197" inputmode="text" />
+        <button class="btn primary" type="submit">Search</button>
+      </form>
+      <p class="status" id="search-status"></p>
+      <div class="grid" id="search-results"></div>
+    </section>
+
+    <!-- COLLECTION -->
+    <section id="view-collection" class="view">
+      <div class="collection-head">
+        <div>
+          <div class="muted small">Estimated total</div>
+          <div class="total" id="collection-total">$0.00</div>
+        </div>
+        <div class="row">
+          <button class="btn small" id="btn-refresh-prices">Refresh prices</button>
+          <button class="btn small" id="btn-export">Export CSV</button>
+        </div>
+      </div>
+      <ul class="collection" id="collection-list"></ul>
+      <p class="muted center" id="collection-empty">No cards saved yet. Scan a card and tap <b>Add to collection</b>.</p>
+    </section>
+  </main>
+
+  <!-- RESULT SHEET -->
+  <div class="sheet" id="sheet" hidden>
+    <div class="sheet-backdrop" data-close></div>
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="card-title">
+      <div class="sheet-bar"><span class="grab"></span><button class="sheet-close" data-close aria-label="Close">✕</button></div>
+      <div id="detected" class="detected" hidden>
+        <div class="detected-head">
+          <span class="muted small">What the camera read</span>
+          <span class="conf" id="confidence"></span>
+        </div>
+        <form id="clue-form" class="clue-form" autocomplete="off">
+          <label>Name <input id="clue-name" /></label>
+          <label>Number <input id="clue-number" placeholder="e.g. 125/197" /></label>
+          <label>Set code <input id="clue-set" placeholder="e.g. OBF" maxlength="4" /></label>
+          <button class="btn small" type="submit">Re-match</button>
+        </form>
+      </div>
+
+      <div id="card-detail"></div>
+
+      <div id="alternates-wrap" hidden>
+        <h3 class="section-title">Not this card? Other matches</h3>
+        <div class="grid compact" id="alternates"></div>
+      </div>
+
+      <details class="debug" id="debug-wrap" hidden>
+        <summary>Raw text read from the card</summary>
+        <pre id="debug"></pre>
+      </details>
+    </div>
+  </div>
+
+  <template id="tpl-card-detail">
+    <div class="detail">
+      <div class="detail-top">
+        <img class="detail-img" alt="" />
+        <div class="detail-info">
+          <h2 id="card-title" class="detail-name"></h2>
+          <div class="detail-set"><img class="set-symbol" alt="" /><span class="set-name"></span></div>
+          <div class="detail-meta muted small"></div>
+          <div class="headline">
+            <div class="headline-price"></div>
+            <div class="headline-source muted small"></div>
+          </div>
+        </div>
+      </div>
+      <h3 class="section-title">Version / markings</h3>
+      <p class="muted small hint">Pick the version that matches your card: 1st Edition stamp, reverse holo (shiny background), holo (shiny picture), promo stamps…</p>
+      <div class="chips variant-chips"></div>
+      <div class="price-tables"></div>
+      <div class="links"></div>
+      <div class="row actions">
+        <button class="btn primary add-btn">Add to collection</button>
+      </div>
+      <p class="muted small fine">Prices are for raw (ungraded) Near Mint copies. TCGplayer prices update about weekly, Cardmarket daily, via TCGdex. eBay links open recent <b>sold</b> listings so you can see real sale prices, including graded copies.</p>
+    </div>
+  </template>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

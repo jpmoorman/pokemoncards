@@ -1,0 +1,18 @@
+{
+  "name": "pokemon-card-scanner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Phone web app that scans Pokémon cards and looks up prices.",
+  "type": "module",
+  "scripts": {
+    "start": "http-server -c-1 -p 8080 .",
+    "test": "node --test tests/unit.test.mjs",
+    "test:e2e": "node tests/e2e.mjs"
+  },
+  "devDependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "http-server": "^14.1.1",
+    "playwright": "^1.56.1",
+    "tesseract.js": "7.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "Pokémon Card Scanner",
+  "short_name": "Card Scanner",
+  "description": "Scan Pokémon cards and look up TCGplayer, Cardmarket and eBay prices.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#14161c",
+  "theme_color": "#14161c",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
