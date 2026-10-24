@@ -30,6 +30,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { pathToFileURL } from 'node:url';
 import { buildIndex, rankCandidates, confidence, reprintRivals } from '../js/match.js';
 import { hash, half, splitOf, sheetCard, scorePrinting, printingSummary, printingReport } from './printing.mjs';
 
@@ -68,7 +69,7 @@ const rows = bench.rows.filter((r) => r.clues && (split === 'all' || splitOf(r, 
 
 // Second pass: js/rerank.js unless --rerank none, or another module exporting rerank(ranked, read, ctx).
 const rerankPath = arg('rerank', 'js/rerank.js');
-const rerank = rerankPath === 'none' ? null : (await import(path.resolve(rerankPath))).rerank;
+const rerank = rerankPath === 'none' ? null : (await import(pathToFileURL(path.resolve(rerankPath)).href)).rerank;
 
 async function run(seed) {
   let lookups = 0;

@@ -12,6 +12,7 @@ import { initCollection, renderCollection } from './collection.js';
 import { initBatch, renderBatch, enqueueCanvas, enqueueFiles, batchCount } from './batch.js';
 import { initTrade, renderTrade } from './trade.js';
 import { startOffline } from './offline.js';
+import { blockPageZoom } from './zoom.js';
 
 const state = {
   stream: null,
@@ -30,6 +31,7 @@ const READY_MS = 3 * 60 * 1000; // a scan not looked at is dropped after this
 const VIEWS = ['scan', 'batch', 'trade', 'search', 'collection'];
 
 async function init() {
+  blockPageZoom();
   document.querySelectorAll('.setpick').forEach(mountSetPicker);
   bindTabs();
   bindScan();

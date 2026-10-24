@@ -21,7 +21,7 @@ const SHELL = [
   'js/api.js', 'js/app.js', 'js/assets.js', 'js/backup.js', 'js/batch.js', 'js/catalog.js', 'js/collection.js', 'js/components.js',
   'js/details.js', 'js/detect.js', 'js/entry.js', 'js/fx.js', 'js/identify.js', 'js/match.js', 'js/ocr.js', 'js/ocr-tesseract.js',
   'js/ocr-worker.js', 'js/offline.js', 'js/parse.js', 'js/ppocr.js', 'js/prices.js', 'js/rerank.js', 'js/setcodes.js', 'js/setpicker.js',
-  'js/sheet.js', 'js/stamps.js', 'js/trade.js', 'js/ui.js',
+  'js/sheet.js', 'js/stamps.js', 'js/trade.js', 'js/ui.js', 'js/zoom.js',
 ];
 const SHELL_WAIT = 2000; // ms a start waits for the network before opening the saved copy
 const CHECK_LIMIT = 30 * 1000; // ms a check for a newer shell may take in the background at most

@@ -31,6 +31,7 @@ import { cardImg } from './components.js';
 import { showResults, openCard } from './sheet.js';
 import { addToCollection } from './collection.js';
 import { inTrade } from './trade.js';
+import { zoomable } from './zoom.js';
 
 const INDEX = 'batch:items';
 const photoKey = (id) => `batch:photo:${id}`;
@@ -792,7 +793,7 @@ async function viewPhoto(id) {
     it.status !== 'processing' ? { label: 'Delete', value: 'delete' } : null,
     { label: 'Close', value: null, primary: true },
   ].filter(Boolean);
-  const img = el('img', { class: 'b-viewer-img', src: url, alt: `Photo ${n}` });
+  const img = zoomable(el('img', { class: 'b-viewer-img', src: url, alt: `Photo ${n}` }));
   const choice = await dialog(null, buttons, img, 'b-viewer');
   URL.revokeObjectURL(url);
   if (!items.includes(it)) return;

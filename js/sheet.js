@@ -11,6 +11,7 @@ import { readStamps, nextPaint } from './ocr.js';
 import { cardTile } from './components.js';
 import { makeEntry } from './entry.js';
 import { fx } from './fx.js';
+import { zoomable } from './zoom.js';
 
 // Current sheet state.
 const sheet = {
@@ -286,6 +287,7 @@ function renderDetail() {
     }
   });
   if (pic) img.src = pic.src;
+  if (pic || fallback) zoomable(img); // tap to see it full screen
   $('.img-note', node).textContent = pic?.source === 'tcgplayer' ? 'Photo: TCGplayer listing for this version' : pic ? 'Standard picture of this card' : 'No picture available';
 
   $('.detail-name', node).textContent = card.name;

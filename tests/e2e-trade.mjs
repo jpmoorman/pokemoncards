@@ -366,7 +366,8 @@ await page.evaluate(() => Object.defineProperty(navigator, 'share', { configurab
 await page.click('#trade-share');
 await page.waitForSelector('.toast:has-text("Trade copied")', { timeout: 5000 }).catch(() => {});
 const clip = await page.evaluate(() => navigator.clipboard.readText().catch((e) => `ERR ${e.message}`));
-t.check('without Web Share it copies the summary to the clipboard', clip === text, clip.slice(0, 80));
+// Windows' clipboard hands the text back with \r\n line ends.
+t.check('without Web Share it copies the summary to the clipboard', clip.replace(/\r\n/g, '\n') === text, clip.slice(0, 80));
 
 // ---- clear (with an Undo still showing: it must not bring a card back into the empty trade) ----
 await line('give', 'Mewtwo ex').locator('button[aria-label="Remove one"]').click();
