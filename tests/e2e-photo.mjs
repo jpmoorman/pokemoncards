@@ -342,11 +342,11 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
   }
 }
 
-// 7b) Full-art cards print the number in white on dark artwork: it is read too, in a
-// bounded number of passes.
-{
+// 7b) Full-art cards print the number in white on dark artwork, special-art cards in dark
+// letters with a light outline on it: both are read too, in a bounded number of passes.
+for (const [style, fill, stroke] of [['white number', '#fff', '#111'], ['outlined dark number', '#1d1428', '#f4f1ea']]) {
   const plain = await makeCard(page, { ...CARDS.charizardEx, bottomLeft: '' });
-  const png = await page.evaluate(async (b64) => {
+  const png = await page.evaluate(async ([b64, fill, stroke]) => {
     const img = new Image();
     img.src = `data:image/png;base64,${b64}`;
     await img.decode();
@@ -363,15 +363,15 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
     g.fillRect(22, 790, 586, 68);
     g.font = 'italic bold 17px sans-serif';
     g.lineWidth = 3;
-    g.strokeStyle = '#111';
-    g.fillStyle = '#fff';
+    g.strokeStyle = stroke;
+    g.fillStyle = fill;
     g.strokeText('G  OBF EN  125/197 ★', 50, 840);
     g.fillText('G  OBF EN  125/197 ★', 50, 840);
     return c.toDataURL('image/png').split(',')[1];
-  }, plain.toString('base64'));
+  }, [plain.toString('base64'), fill, stroke]);
   const photo = await makePhoto(page, CARDS.charizardEx, { ...PHOTOS.flat, cardImage: Buffer.from(png, 'base64') });
   const r = await identifyIn(photo.buffer);
-  t.check(`a full-art card's white number is read (${r.number}, ${r.reads} OCR passes)`, r.id === 'sv03-125' && r.number === '125/197' && r.reads <= 6, JSON.stringify(r));
+  t.check(`a full-art card's ${style} is read (${r.number}, ${r.reads} OCR passes)`, r.id === 'sv03-125' && r.number === '125/197' && r.reads <= 6, JSON.stringify(r));
 }
 
 // 8) Two scans at once (Batch processing while scanning a card): every read keeps its

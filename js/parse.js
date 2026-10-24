@@ -36,12 +36,22 @@ const SUBSET_PREFIXES = ['TG', 'GG', 'SV', 'RC', 'H'];
  */
 function looseNumbers(t, totals, max = 2) {
   const found = [];
-  // Runs of digits, slashes and letters OCR confuses with them.
-  for (const m of t.matchAll(/[0-9OoIilLSBDZ|/\\]{4,14}/g)) {
-    const s = m[0].replace(/\\/g, '/');
-    // Not a Pokédex number ("#157", "NO. 0699"), level, HP, damage, weight or year.
+  // Runs of digits, slashes and letters OCR confuses with them. A comma or full stop inside
+  // one is a stray mark ("1997,165"), or the slash before a zero-padded set size ("Q24,
+  // 0886"; not in a list of years: "©1995, 96, 98"): both are tried.
+  const runs = [];
+  for (const m of t.matchAll(/[0-9OoQIilLSBDZ|/\\]+(?:[,.]\s?[0-9OoQIilLSBDZ|/\\]+)*/g)) {
+    const r = m[0].replace(/\\/g, '/').replace(/\s/g, '');
+    runs.push([m, r.replace(/[,.]/g, '')]);
+    if (/^(?=[^,./]*\d)[^,./]{1,3}[,.][^,./]{3,}$/.test(r)) runs.push([m, r.replace(/[,.]/, '/')]);
+  }
+  for (const [m, s] of runs) {
+    if (s.length < 4 || s.length > 14) continue;
+    // Not a Pokédex number ("#157", "NO. 0699"), level, HP, damage, weight or year (none of
+    // them has a slash).
     const pre = t.slice(Math.max(0, m.index - 4), m.index);
-    if (/(#|N[oO0]\.?\s*|L[vV]\.?\s*|HP\s*|[-+×©])$/.test(pre) || /^\s*(lbs|HP|[+×,-])/.test(t.slice(m.index + s.length))) continue;
+    const post = t.slice(m.index + m[0].length);
+    if (!m[0].includes('/') && (/(#|N[oO0]\.?\s*|L[vV]\.?\s*|HP\s*|[-+×©])$/.test(pre) || /^\s*(lbs|HP|[+×,-])/.test(post))) continue;
     for (let i = 1; i < s.length; i++) {
       // The set size: 3 digits, or 2 (modern sets print "088" for 88, which reads either way).
       for (const len of [3, 2]) {
@@ -54,7 +64,10 @@ function looseNumbers(t, totals, max = 2) {
         // 1, l, I or | ("1837165"), or lost ("105123").
         let raw = '';
         let how = 0;
-        if (sep === '/' && after <= 2) [raw, how] = [s.slice(0, i - 1).slice(-len), 4];
+        // With the slash read, a 2-digit size goes with a number of 1 or 2 digits ("189/20" is
+        // no number: "/203" lost its last digit).
+        const before = s.slice(0, i - 1);
+        if (sep === '/' && after <= 2 && (len === 3 || !/\d{3}$/.test(before))) [raw, how] = [before.slice(-len), 4];
         else if (len === 3 && after <= 3) {
           const misread = /[71lI|]/.test(sep) ? s.slice(Math.max(0, i - 4), i - 1) : '';
           const lost = s.slice(Math.max(0, i - 3), i);
@@ -85,7 +98,13 @@ function looseNumbers(t, totals, max = 2) {
  * Returns { numbers: [{prefix, num, total, text}], setCodes: [string], codeCandidates: [string] }.
  */
 export function parseBottomText(text, { totals } = {}) {
-  const t = (text || '').replace(/[–—−]/g, '-').replace(/[⁄∕]/g, '/');
+  let t = (text || '').replace(/[–—−]/g, '-').replace(/[⁄∕]/g, '/');
+  // A set size split by a space ("189/20 3"): joined again when only that makes it a known
+  // size the number fits (numbers run at most 150 past their set size).
+  if (totals?.size) {
+    const fits = (n, tot) => totals.has(tot) && n <= tot + 150;
+    t = t.replace(/(\d{1,3})(\s?\/\s?)(\d{1,2}) (\d)/g, (m, n, sl, a, b) => (!fits(+n, +a) && fits(+n, +(a + b)) ? `${n}${sl}${a}${b}` : m));
+  }
   const numbers = [];
   const seen = new Set();
   const push = (prefix, rawNum, rawTotal) => {
@@ -195,6 +214,8 @@ export function cleanNameLine(line) {
     .replace(/\bHP\s*[0-9OIlSB]{2,3}\b/gi, ' ')
     .replace(/\b[0-9OIlSB]{2,3}\s*HP\b/gi, ' ')
     .replace(/\bevol\w*\s+from\b.*$/i, ' ')
+    // ...also when "Evolves" got mangled or lost: "plves rom Haunter", "rom Charmeleon".
+    .replace(/(?:^|\s)(?:\S*ves\s+)?f?r[o0]m\s+\S.*$/i, ' ')
     .replace(/\bput\s+.*\bon the\b.*$/i, ' ')
     .replace(/\bstage\s*[12]\b/gi, ' ')
     .replace(/[0-9]+/g, ' ')

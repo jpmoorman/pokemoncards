@@ -1,10 +1,10 @@
 // Collector numbers OCR mangled on real photos, read with the help of the printed set sizes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBottomText, parseLabelNumbers } from '../js/parse.js';
+import { parseBottomText, parseLabelNumbers, pickName } from '../js/parse.js';
 
 // Printed set sizes, as the catalog gives them (a few real ones).
-const totals = new Set([64, 82, 88, 95, 101, 102, 111, 123, 165, 197, 203, 236]);
+const totals = new Set([20, 64, 82, 88, 95, 101, 102, 111, 123, 165, 197, 203, 236]);
 const read = (text) => parseBottomText(text, { totals }).numbers.map((n) => n.text);
 
 test('number with the slash read as 7, or lost, next to a known set size', () => {
@@ -25,6 +25,22 @@ test('number with letters around it or the rarity mark read as a digit', () => {
 test('a zero-padded number with its slash read as a comma and a 0 as a letter', () => {
   assert.deepEqual(read('ID Q24, 086 *'), ['024/086']);
   assert.deepEqual(read('J Td 024.088 »'), ['024/088']);
+  // ...with the rarity mark read as a digit after the set size.
+  assert.deepEqual(read('Rw Q24, 0886 *'), ['024/088']);
+  // A list of copyright years is no number.
+  assert.deepEqual(read('©1995 96.97, 93 Nintendo'), []);
+  assert.deepEqual(read('Sugimori 519965. 96. 98 |'), []);
+});
+
+test('a number with a stray comma, its set size split, or a dash before it', () => {
+  // The slash read as "7," on an italic special-art number.
+  assert.deepEqual(read('MEW 1997,165 R25'), ['199/165']);
+  // "/203" read as "/20 3": not 189/20 (no number runs 150 past its set size), nor 89/20.
+  assert.deepEqual(read('189/20 38 4'), ['189/203']);
+  assert.deepEqual(read('189/20 *'), []);
+  // The set symbol read as "-8" before the number: a dash only rules out a number without a slash.
+  assert.deepEqual(read('Sa 12 -8189/2038'), ['189/203']);
+  assert.deepEqual(read('resistance -30 retreat'), []);
 });
 
 test('a known set size comes first', () => {
@@ -67,4 +83,12 @@ test('slab label numbers', () => {
   assert.deepEqual(parseLabelNumbers('2026 POKEMON PERFECT ORDER\n#024/088\nAURORUS').map((n) => [n.num, n.total]), [[24, 88]]);
   // No year, no label (a misread "HP 330" on a card's name bar).
   assert.deepEqual(parseLabelNumbers('Charizard ex\n#330'), []);
+});
+
+test('the evolves-from line is no name, even with "Evolves" lost', () => {
+  const best = (...texts) => pickName(texts.map((text, i) => ({ text, height: 40 - i, conf: 90 }))).best;
+  assert.equal(best('rom Charmeleon', 'Charizard'), 'Charizard');
+  assert.equal(best('volves from Croconaw'), '');
+  assert.equal(best('Gengar Zw plves rom Haunter'), 'Gengar Zw');
+  assert.equal(best('Romantic Charizard'), 'Romantic Charizard');
 });

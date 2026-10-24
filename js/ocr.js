@@ -272,6 +272,62 @@ function flattenLight(g, w, h) {
   }
 }
 
+/**
+ * In place, on an enhanced (grey) canvas: dark text printed with a light outline on dark
+ * artwork (the numbers and illustrator of special-art cards) read as dark letters cut out
+ * on white. Only dark areas the light outlines close off from the picture's edges stay
+ * dark: the artwork around them, which reaches an edge, turns white. Plain dark text on a
+ * light background stays as it is; light text on dark is lost (read it inverted instead).
+ */
+function fillOutlined(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const w = canvas.width;
+  const h = canvas.height;
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  // Dark is below the Otsu threshold of the picture.
+  const hist = new Float64Array(256);
+  for (let i = 0; i < d.length; i += 4) hist[d[i]]++;
+  const n = w * h;
+  let sum = 0;
+  for (let v = 0; v < 256; v++) sum += v * hist[v];
+  let below = 0;
+  let sumBelow = 0;
+  let best = -1;
+  let t = 127;
+  for (let v = 0; v < 255; v++) {
+    below += hist[v];
+    sumBelow += v * hist[v];
+    if (!below || below === n) continue;
+    const between = below * (n - below) * (sumBelow / below - (sum - sumBelow) / (n - below)) ** 2;
+    if (between > best) [best, t] = [between, v];
+  }
+  // Flood the dark areas that touch an edge (4-connected: a gap at a corner of an outline
+  // doesn't let the artwork in).
+  const out = new Uint8Array(n); // 1 = dark, 2 = dark and reached from an edge
+  for (let i = 0; i < n; i++) out[i] = d[i * 4] <= t ? 1 : 0;
+  const todo = [];
+  const reach = (i) => {
+    if (out[i] === 1) {
+      out[i] = 2;
+      todo.push(i);
+    }
+  };
+  for (let x = 0; x < w; x++) reach(x), reach(n - w + x);
+  for (let y = 0; y < h; y++) reach(y * w), reach(y * w + w - 1);
+  while (todo.length) {
+    const i = todo.pop();
+    const x = i % w;
+    if (x > 0) reach(i - 1);
+    if (x < w - 1) reach(i + 1);
+    if (i >= w) reach(i - w);
+    if (i < n - w) reach(i + w);
+  }
+  for (let i = 0; i < n; i++) d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = out[i] === 1 ? 0 : 255;
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}
+
 /** Pictures one under the other on white, `gap` px apart. */
 function stack(canvases, gap = 30) {
   const c = document.createElement('canvas');
@@ -374,57 +430,94 @@ function legible(lines, re) {
  */
 async function readName(card, ocr) {
   const res = await ocr(enhance(crop(card, NAME_REGION, 1600), false, { text: 'black' }), 11);
-  return { name: pickName(res.lines), text: res.text, conf: legible(res.lines, /[A-Za-z]{3}/), card };
+  return { name: pickName(res.lines), text: res.text, lines: res.lines, conf: legible(res.lines, /[A-Za-z]{3}/), card };
 }
 
 /**
- * A name read that isn't a known card name, read again as one block of text (sparse-text
- * mode gets lost on some name bars), in plain grey this time (white names too).
+ * A name read that isn't exactly a known card name, read again as one block of text
+ * (sparse-text mode gets lost on some name bars) in plain grey (white names, and black ones
+ * the black-text clean-up nicked a letter of). Whichever read's name line matches a known
+ * card name better is kept. `match(text)`: how well text matches a known name (0–1), or
+ * undefined when that can't be told yet (catalog not loaded: any name read is kept).
  */
-async function nameAgain(r, ocr, isKnown) {
-  if (isKnown(r.name.best) || isKnown(r.text)) return r;
+async function nameAgain(r, ocr, match) {
+  const m = match(r.name.best);
+  if (m === undefined ? r.name.best || r.text.trim() : Math.max(m, match(r.text)) >= 1) return r;
   const again = await ocr(enhance(crop(r.card, NAME_REGION, 1600)), 6);
   const n2 = pickName(again.lines);
-  const name = isKnown(n2.best) || isKnown(again.text) || !r.name.best ? n2 : r.name;
-  return { ...r, name, text: `${r.text}\n---block---\n${again.text}` };
+  const known = (t) => (match(t) === undefined ? !!t : match(t) >= KNOWN);
+  const better = match(n2.best) > m || (!known(r.name.best) && !known(r.text) && (known(again.text) || !r.name.best));
+  return { ...r, name: better ? n2 : r.name, text: `${r.text}\n---block---\n${again.text}`, lines: [...r.lines, ...again.lines] };
 }
 
 // Printed set sizes, from the card list once it is in: a number OCR mangled is still found
 // next to one of them (see parse.js).
-let sizes = { of: null, set: undefined };
+// (`cut`: 3-digit ones without their last digit.)
+let sizes = { of: null, set: undefined, cut: undefined };
 function setSizes() {
   const sets = catalog.index?.setsById;
-  if (sets && sizes.of !== sets) sizes = { of: sets, set: new Set([...sets.values()].map((s) => s.cardCount?.official).filter((n) => n >= 20)) };
+  if (sets && sizes.of !== sets) {
+    const set = new Set([...sets.values()].map((s) => s.cardCount?.official).filter((n) => n >= 20));
+    sizes = { of: sets, set, cut: new Set([...set].filter((n) => n >= 100).map((n) => Math.floor(n / 10))) };
+  }
   return sizes.set;
 }
 
 /**
- * Number areas (or spots) of a card, enlarged to `width`, cleaned up and put one under the
- * other: black text, or (inverted) white text.
+ * Number areas (or spots) of a card, each enlarged to `width` and cleaned up for `text`:
+ * 'black', 'white' (inverted) or 'outlined' (dark text in a light outline, see fillOutlined).
  */
-function numberAreas(card, regions, width, inverted) {
-  return stack(regions.map((r) => enhance(crop(card, r, width), inverted, { text: inverted ? 'white' : 'black' })));
+function numberAreas(card, regions, width, text) {
+  return regions.map((r) => {
+    const c = enhance(crop(card, r, width), text === 'white', { text: text === 'white' ? 'white' : 'black' });
+    return text === 'outlined' ? fillOutlined(c) : c;
+  });
 }
 
 /** Number-area OCR (collector number, set code), as one block of text. */
 async function readBottom(card, ocr) {
-  const res = await ocr(numberAreas(card, NUMBER_REGIONS, 1400, false), 6, { adaptive: true });
+  const res = await ocr(stack(numberAreas(card, NUMBER_REGIONS, 1400, 'black')), 6, { adaptive: true });
   return { bottom: parseBottomText(res.text, { totals: setSizes() }), text: res.text, conf: legible(res.lines, /[A-Za-z0-9]{3}/), card };
 }
 
 /**
- * A bottom read without a number (or only one without its set size, like a promo's): the
- * number spots alone, with less around them to get lost in; then the same for white text
- * (full-art and special cards).
+ * A bottom read without a number with a known set size (or a promo's): the number spots
+ * alone, with less around them to get lost in, black and outlined text (special-art cards)
+ * in one go (`kinds` 'spots'); then white text (full-art cards, 'white').
  */
-async function bottomAgain(r, ocr) {
-  for (const inverted of [false, true]) {
-    if (r.bottom.numbers.some((n) => n.total)) break;
-    const res = await ocr(numberAreas(r.card, NUMBER_SPOTS, 900, inverted), 6, { adaptive: true });
-    r = { ...r, bottom: mergeBottom(r.bottom, parseBottomText(res.text, { totals: setSizes() })), text: `${r.text}\n---${inverted ? 'white' : 'spots'}---\n${res.text}` };
+async function bottomAgain(r, ocr, kinds = ['spots', 'white']) {
+  const reads = { spots: ['black', 'outlined'], white: ['white'] };
+  for (const kind of kinds) {
+    if (numberFound(r.bottom)) break;
+    const texts = reads[kind];
+    const res = await ocr(stack(texts.flatMap((t) => numberAreas(r.card, NUMBER_SPOTS, 900, t))), 6, { adaptive: true });
+    r = { ...r, bottom: mergeBottom(r.bottom, parseBottomText(res.text, { totals: setSizes() })), text: `${r.text}\n---${kind}---\n${res.text}` };
   }
   return r;
 }
+
+/**
+ * A number read with a set size that exists, or one that lost its last digit (see
+ * sizeRank), or a promo's ("SWSH050"): a lone one ("041") may be anything, upside-down text
+ * too, and "11/59" read off "Illus." is no number.
+ */
+function numberFound(bottom) {
+  return bottom.numbers.some((n) => n.prefix || sizeRank(n.total) < 2);
+}
+
+/**
+ * How sure a number's set size is: 0 one that exists, 1 one whose last digit was lost (a
+ * thin "1" at the end: "16/11" for 16/111), 2 another, 3 none.
+ */
+function sizeRank(total) {
+  const known = setSizes();
+  if (total == null) return 3;
+  if (!known || known.has(total)) return 0;
+  return sizes.cut.has(total) ? 1 : 2;
+}
+
+// A dictionary match this good (see match.findNamesInText) counts as a known card name.
+const KNOWN = 0.75;
 
 // Keep a sliver around a found card, in case an edge was found on its inner frame.
 const WARP_MARGIN = 0.015;
@@ -433,8 +526,11 @@ const WARP_MARGIN = 0.015;
 // with a bottom line reading at `bottom` or more and a name area at `name` or more it is
 // the right way up; with a bottom line at `sureBottom` or more it is turned only for a name
 // that reads clearly that way. On 43 real photos read both ways round, no upside-down read
-// met the first, and two the second (both with a clearly read name when turned).
-const UPRIGHT = { name: 60, bottom: 80, sureBottom: 85 };
+// met the first, and two the second (both with a clearly read name when turned). Else the
+// other way round wins with a bottom line reading at `turnBottom` or more (the first's
+// below it; 6 in 268 cards read upside down got there, 201 the right way up), or with
+// clearly higher confidences (`margin` more, bottom and name added up).
+const UPRIGHT = { name: 60, bottom: 80, sureBottom: 85, turnBottom: 70, margin: 20 };
 // A whole photo is OCR'd at most this big: reading time grows with the picture (a 12-megapixel
 // phone photo with no card found took over a minute at full size). With no card outline it
 // is the main read (2.6 MP keeps a 1600 × 1600 photo whole); after the card's own areas
@@ -474,12 +570,12 @@ const GUIDE_FILLED = 0.7;
 
 /**
  * What to read, best guess first:
- *   first:  read in full (name, also in a second OCR mode; number, also inverted), or
+ *   first:  read in full (name, also in a second OCR mode; number, also its spots), or
  *           lightly (one pass each) when `light`
  *   turns:  the same card other ways up, tried when the first read doesn't look the right
  *           way up: name area first, the number area too if that doesn't settle it and
  *           the first number area read wasn't clear
- *   others: other outlines (name in both OCR modes, number once)
+ *   others: other outlines (number once, name once if no known one was read yet)
  * A camera guide crop is the card already (upright, or held upside down) when the card
  * fills it. When the card found in it (quickly, on a small copy) clearly doesn't, that
  * card is straightened and read instead, the crop as is only if that fails.
@@ -544,17 +640,22 @@ export async function readCard(canvas, onStatus, opts = {}) {
     if (!seen.has(text)) seen.set(text, opts.findName(text));
     return seen.get(text);
   };
-  const isKnown = (text, min = 0.75) => {
+  const isKnown = (text, min = KNOWN) => {
     const k = lookup(text);
     return k === undefined ? !!text : !!k && k.score >= min;
   };
+  // How well text matches a known card name, 0–1 (undefined: can't tell, the card list
+  // isn't in yet).
+  const match = (text) => (!opts.findName || opts.findName('') === undefined ? undefined : lookup(text)?.score || 0);
   // OCR of upside-down or sideways text can pass for a short name with a letter or two
   // off; read the right way up, names nearly always come out whole.
   const isSure = (text) => isKnown(text, 0.9);
-  const named = (n) => isKnown(n.name.best) || isKnown(n.text);
   // Text the right way up mostly reads with OCR confidence well above 75, upside-down or
   // sideways text below it: a known name read that clearly is the card the right way up.
-  const clear = (n) => isSure(n.name.best) || isSure(n.text) || (named(n) && n.conf >= 75);
+  // Only the name line, or a line that read clearly, counts: somewhere in the junk
+  // upside-down text reads as, a short name ("Dana", "Seer", "Klink") often turns up (in 7
+  // of 268 cards read upside down; never as the name line).
+  const clear = (n) => isSure(n.name.best) || (isKnown(n.name.best) && n.conf >= 75) || n.lines.some((l) => l.conf >= 75 && isSure(l.text));
   // The right way up, the bottom line (illustrator, copyright, weakness…) nearly always has
   // a line reading at 80 or more; upside down hardly ever, and then not with a name area
   // reading at 60 or more as well.
@@ -592,9 +693,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
     nameText = n.text;
     bottom = b.bottom;
   };
-  // A number read with its set size (or a promo's, "SWSH050"): a lone one ("041") may be
-  // anything, upside-down text too.
-  const numbered = () => bottom.numbers.some((n) => n.total || n.prefix);
+  const numbered = () => numberFound(bottom);
   // A number or a clearly read name means this is the card, the right way up.
   const done = () => numbered() || isSure(name.best) || isSure(nameText);
 
@@ -605,12 +704,14 @@ export async function readCard(canvas, onStatus, opts = {}) {
     onStatus?.('Reading card name…');
     await nextPaint();
     let n = await readName(v.card, ocr);
-    if (!todo.light) n = await nameAgain(n, ocr, isKnown);
+    if (!todo.light) n = await nameAgain(n, ocr, match);
     onStatus?.('Reading card number…');
     let b = await readBottom(v.card, ocr);
-    if (!todo.light) b = await bottomAgain(b, ocr);
+    // The number spots too, when the number areas gave no number; for white text only once
+    // the card is known to be the right way up (below).
+    if (!todo.light) b = await bottomAgain(b, ocr, ['spots']);
     note(v, n, b);
-    first = { n, b };
+    first = { v, n, b };
     use(v, n, b);
     debug.steps.push(`${v.how} name ${Math.round(n.conf)} bottom ${Math.round(b.conf)}`);
     // A whole photo read as is is only the card if it read like one.
@@ -619,10 +720,10 @@ export async function readCard(canvas, onStatus, opts = {}) {
 
   if (first && !numbered() && !upright(first) && todo.turns.length) {
     // Maybe the card is the other way round. Taken that way, a card name must read
-    // clearly (or be the only one read at all); failing that, the way round whose text
-    // reads with clearly higher OCR confidence wins. A bottom line that read clearly is
-    // seldom upside down (the name area may still be unreadable: holo foil, a sticker):
-    // then only a clearly read name turns the card.
+    // clearly; failing that, the way round with a number, or whose bottom line reads
+    // clearly, or whose text reads with clearly higher OCR confidence wins. A bottom line
+    // that read clearly is seldom upside down (the name area may still be unreadable: holo
+    // foil, a sticker): then only a clearly read name turns the card.
     const legible = first.b.conf >= UPRIGHT.sureBottom;
     const probes = [];
     let turn = null;
@@ -631,7 +732,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
       const n = await readName(v.card, ocr);
       note(v, n);
       probes.push({ v, n });
-      if (isSure(n.name.best) || isSure(n.text) || (!legible && !named(first.n) && named(n))) {
+      if (clear(n)) {
         turn = probes.at(-1);
         break;
       }
@@ -640,12 +741,13 @@ export async function readCard(canvas, onStatus, opts = {}) {
       const p = probes.reduce((a, q) => (q.n.conf > a.n.conf ? q : a));
       p.b = await readBottom(p.v.card, ocr);
       note(p.v, null, p.b);
-      if (p.n.conf + p.b.conf > first.n.conf + first.b.conf + 10) turn = p;
+      const [a, b] = [first.b.conf, p.b.conf];
+      if (numberFound(p.b.bottom) || (b >= UPRIGHT.turnBottom && a < UPRIGHT.turnBottom) || (b >= a && p.n.conf + b > first.n.conf + a + UPRIGHT.margin)) turn = p;
     }
     if (turn) {
       // It reads this way round: start over from here.
       onStatus?.('Reading card number…');
-      const n = await nameAgain(turn.n, ocr, isKnown);
+      const n = await nameAgain(turn.n, ocr, match);
       const b = await bottomAgain(turn.b || (await readBottom(turn.v.card, ocr)), ocr);
       note(turn.v, n, b);
       use(turn.v, n, b);
@@ -653,21 +755,32 @@ export async function readCard(canvas, onStatus, opts = {}) {
     }
     debug.steps.push(`turns: ${probes.map((p) => `${p.v.how} name ${Math.round(p.n.conf)}${p.b ? ` bottom ${Math.round(p.b.conf)}` : ''}`).join(', ')}${turned ? ' -> turned' : ''}`);
   }
+  // The right way up: white text in the number spots too, when no number was read yet.
+  if (first && !turned && !todo.light && !numbered()) {
+    const b = await bottomAgain(first.b, ocr, ['white']);
+    note(first.v, null, b);
+    ({ bottom } = b);
+  }
 
-  // Other outlines, unless the card was just found to be the other way round.
+  // Other outlines (the card in a toploader when the toploader was taken, or the other way
+  // round), unless the card was just found to be the other way round: their number area,
+  // and their name area if no known name was read yet.
   if (!done() && !turned) {
     for (const v of todo.others()) {
-      onStatus?.('Reading card name…');
-      const n = await nameAgain(await readName(v.card, ocr), ocr, isKnown);
+      onStatus?.('Reading card number…');
       const b = await readBottom(v.card, ocr);
-      note(v, n, b);
       bottom = mergeBottom(bottom, b.bottom);
-      if (!isKnown(name.best) && (isKnown(n.name.best) || !name.best)) {
-        name = n.name;
-        card = v.card;
+      let n = null;
+      if (!isKnown(name.best) && !isKnown(nameText)) {
+        n = await readName(v.card, ocr);
+        if (isKnown(n.name.best) || !name.best) {
+          name = n.name;
+          card = v.card;
+        }
+        nameText += `\n${n.text}`;
       }
-      nameText += `\n${n.text}`;
-      debug.steps.push(`${v.how} name ${Math.round(n.conf)} bottom ${Math.round(b.conf)}`);
+      note(v, n, b);
+      debug.steps.push(`${v.how}${n ? ` name ${Math.round(n.conf)}` : ''} bottom ${Math.round(b.conf)}`);
       if (done()) break;
     }
   }
@@ -714,7 +827,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
   // The name read is garbage (glare, a sticker…): use a known card name found in what
   // we read, name area first.
   if (opts.findName && !isKnown(name.best)) {
-    const hit = [nameText, fullText].map(lookup).find((k) => k && k.score >= 0.75);
+    const hit = [nameText, fullText].map(lookup).find((k) => k && k.score >= KNOWN);
     if (hit) {
       if (!name.all.includes(name.best)) name.all = [name.best, name.all].filter(Boolean).join(' ');
       name.best = hit.name;
@@ -733,8 +846,9 @@ function mergeBottom(a, b) {
   const key = (n) => `${n.prefix}|${n.num}|${n.total}`;
   const seen = new Set(a.numbers.map(key));
   return {
-    // Numbers read with their set size first: a lone one ("067") is more often something else.
-    numbers: [...a.numbers, ...b.numbers.filter((n) => !seen.has(key(n)))].sort((x, y) => (x.total == null) - (y.total == null)),
+    // Numbers read with a set size that exists first: a lone one ("067") is more often
+    // something else (see sizeRank).
+    numbers: [...a.numbers, ...b.numbers.filter((n) => !seen.has(key(n)))].sort((x, y) => sizeRank(x.total) - sizeRank(y.total)),
     setCodes: [...new Set([...a.setCodes, ...b.setCodes])],
     codeCandidates: [...new Set([...a.codeCandidates, ...b.codeCandidates])],
   };
