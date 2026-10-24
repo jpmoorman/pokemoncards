@@ -128,6 +128,21 @@ t.check(
   /Replace the 4 cards saved here and your current trade with the backup's 3 cards and a trade\?/.test(ask) && kept.total === '$970.49' && (await saved(app.page)).names.length === 2,
   `"${ask}" kept ${kept.total}`,
 );
+// A backup with only a trade in it (exported with no saved cards) replaces only the trade.
+const tradeOnly = await app.page.evaluate(async (trade) => JSON.stringify((await import('/js/backup.js')).makeBackup([], trade)), { give: [entry('base1-58', 'Pikachu', 3)], get: [], rate: 100, rateSide: 'give' });
+await app.page.setInputFiles('#backup-file', { name: 'trade.json', mimeType: 'application/json', buffer: Buffer.from(tradeOnly) });
+const askTrade = await app.page.waitForSelector('.modal', { timeout: 5000 }).then((n) => n.textContent()).catch(() => '');
+await app.page.click('.modal .btn:has-text("Replace")');
+const tradeToast = await toastText(app.page);
+const afterTrade = await saved(app.page);
+await app.page.click('.tab[data-view="trade"]');
+const trade2 = await app.page.textContent('#view-trade');
+await app.page.click('.tab[data-view="collection"]');
+t.check(
+  'a backup with only a trade replaces the trade and keeps the saved cards',
+  /Replace your current trade with the backup's trade\?/.test(askTrade) && /Imported your trade/.test(tradeToast) && afterTrade.total === '$965.21' && afterTrade.names.length === 2 && /Pikachu/.test(trade2) && !/Aurorus/.test(trade2),
+  `"${askTrade}" "${tradeToast}" ${JSON.stringify(afterTrade)}`,
+);
 await app.page.setInputFiles('#backup-file', { name: 'other.json', mimeType: 'application/json', buffer: Buffer.from('{"cards": []}') });
 const refused = await toastText(app.page);
 await app.page.setInputFiles('#backup-file', { name: 'notes.json', mimeType: 'application/json', buffer: Buffer.from('not json') });

@@ -4,7 +4,7 @@ A free web app for your phone: point the camera at a Pokémon card and it identi
 
 **How it identifies a card**
 
-1. Text recognition ([PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) PP-OCRv6 tiny models on [onnxruntime-web](https://onnxruntime.ai/), with [Tesseract.js](https://github.com/naptha/tesseract.js) as a fallback on older phones) runs **on your phone**. It reads the card's
+1. Text recognition ([PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) PP-OCRv6 tiny models on [onnxruntime-web](https://onnxruntime.ai/), with [Tesseract.js](https://github.com/naptha/tesseract.js) as a fallback where those can't start) runs **on your phone**. It reads the card's
    - **name** (the biggest text at the top),
    - **collector number and set size** (`125/197`, `4/102`, `TG05/TG30`, `SWSH050`),
    - **set code** printed on Scarlet & Violet and newer cards (`OBF EN`, `POR EN`, `PBL EN`, `30C EN`, …).
@@ -39,7 +39,7 @@ The app is a static website, so it needs to be hosted somewhere with **HTTPS**, 
    - **iPhone (Safari):** Share → *Add to Home Screen*.
    - **Android (Chrome):** ⋮ → *Add to Home screen* / *Install app*.
 
-The first time you open it, it downloads the card list (a few MB) and the text-recognition engine (about 5 MB). After that, both are cached on the phone.
+The first time you open it, it downloads the card list (a few MB), the text-recognition engine and its models (about 5.6 MB) and the card details (about 0.3 MB). After that, they are kept on the phone and it scans without a connection. It needs iOS 16.4 or newer on an iPhone (any current Chrome on Android).
 
 ## Tips for good scans
 
@@ -55,7 +55,7 @@ No build step: plain HTML, CSS and ES modules.
 ```bash
 npm install          # only needed for tests
 npm start            # http://localhost:8080 (the camera works on localhost)
-npm test             # unit tests: parsing, matching, prices
+npm test             # unit tests: parsing, matching, ranking, prices, the details file, backups, the PP-OCR helpers, the big-file list
 npm run test:e2e     # headless Chromium + real OCR on generated card images
 ```
 
@@ -63,7 +63,7 @@ npm run test:e2e     # headless Chromium + real OCR on generated card images
 | --- | --- |
 | `js/ocr.js` | Camera, finding the card, which areas to read and which way up |
 | `js/ppocr.js`, `js/ocr-worker.js` | PP-OCR text reading in a worker (models in `models/`, runtime in `vendor/`) |
-| `js/ocr-tesseract.js` | The Tesseract reader, used only where PP-OCR can't run (iOS before 16.4) |
+| `js/ocr-tesseract.js` | The Tesseract reader, used only where PP-OCR can't start (no WebAssembly SIMD, or its runtime fails); it downloads from jsDelivr, so it needs a connection |
 | `js/parse.js` | Pulls numbers, set codes and the name out of OCR text |
 | `js/match.js` | Fuzzy-matches the clues against the card list and ranks the candidates |
 | `js/prices.js` | Prices per version (1st Ed., reverse holo, …) and marketplace links |
@@ -93,14 +93,16 @@ The second ranking pass compares what the camera read with each candidate's HP, 
 
 ### Measuring
 
-**On the phone: the speed test page.** Open `https://<your-username>.github.io/<repo-name>/bench.html` (it isn't linked from the app), reload it once, tap **Run** and keep the screen on for a minute or two, then tap **Copy results** and paste them into the chat. It records the phone and browser (iOS / Safari version, processor cores, WebAssembly SIMD, WebGPU, storage, which of the app's big files are saved), the camera's real resolution (it opens the camera once, takes no picture), how long the card list, card details file and text reader take to load, and timed scans of five sample cards (public TCGdex pictures, drawn ones when offline) as camera scans and as photos, the first time and again: tap to result, finding the card, reading the text, matching, and the stamp check. Also the text reader's memory (after six whole-card reads too), its restart after being stopped when idle, and a search speed test. It says which text reader ran (PP-OCR, or Tesseract where PP-OCR can't run). If the phone reloads the page during a run (out of memory), opening it again shows what was measured until then. `?samples=2&passes=1` makes it shorter, `?camera=0` skips the camera, and `?reader=tesseract` measures the Tesseract reader the app used before PP-OCR (still its fallback), for the before-and-after comparison. `node tests/e2e-bench-page.mjs` checks it in Chromium.
+**On the phone: the speed test page.** Open `https://<your-username>.github.io/<repo-name>/bench.html` (it isn't linked from the app), reload it once, tap **Run** and keep the screen on for a minute or two, then tap **Copy results** and send them to whoever asked for them. It records the phone and browser (iOS / Safari version, processor cores, WebAssembly SIMD, WebGPU, storage, which of the app's big files are saved), the camera's real resolution (it opens the camera once, takes no picture), how long the card list, card details file and text reader take to load, and timed scans of five sample cards (public TCGdex pictures, drawn ones when offline) as camera scans and as photos, the first time and again: tap to result, finding the card, reading the text, matching, and the stamp check. Also the text reader's memory (after six whole-card reads too), its restart after being stopped when idle, and a search speed test. It says which text reader ran (PP-OCR, or Tesseract where PP-OCR can't run). If the phone reloads the page during a run (out of memory), opening it again shows what was measured until then. `?samples=2&passes=1` makes it shorter, `?camera=0` skips the camera, and `?reader=tesseract` measures the Tesseract reader the app used before PP-OCR (still its fallback), for the before-and-after comparison. `node tests/e2e-bench-page.mjs` checks it in Chromium.
 
 **Accuracy on labelled photos** (the private test-photo repo):
 
 ```bash
-node tests/bench.mjs --photos ../pokemoncards-testphotos --split dev --out bench.json   # the real app in Chromium
-node tests/rank-eval.mjs --bench bench.json --photos ../pokemoncards-testphotos --split dev --by-version  # re-ranks saved reads in seconds
+node tests/bench.mjs --photos ../pokemoncards-testphotos --split dev --out ../bench-dev.json   # the real app in Chromium
+node tests/rank-eval.mjs --bench ../bench-dev.json --photos ../pokemoncards-testphotos --split dev --by-version  # re-ranks saved reads in seconds
 ```
+
+What the bench writes (`--out`, and the straightened cards with `--save-cards <dir>`) comes from the private photos: keep it outside this repo, or in the ignored `test-results/` (the default `--out`). `bench.mjs` refuses any other place inside the repo.
 
 Both score the card (top 1 / top 5) and the **printing**: the version the result sheet would show first for the best match (1st Edition, shadowless, reverse holo, set-logo and other stamps, picked the way `js/stamps.js` picks it from the stamps read on the artwork), against the photo's labelled version. "Right card + printing" counts only photos whose label names a printing TCGdex lists (a card printed only one way counts when the card is right; "unknown" labels, labellers who disagree and printings TCGdex doesn't list are left out); "version picked right" counts the right cards printed more than one way, where the pick matters. The details snapshot has no prices, so every printing counts as priced. See `tests/printing.mjs`.
 

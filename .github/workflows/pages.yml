@@ -42,3 +42,30 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
       - id: deployment
         uses: actions/deploy-pages@v4
+      # GitHub Pages picks the content types. The text reader's worker imports the runtime
+      # (.mjs) as a module, which only works if it comes as JavaScript: otherwise the app
+      # falls back to the slower Tesseract reader. Checked on the published site.
+      - name: Check the content types of the published files
+        env:
+          BASE: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          node --input-type=module -e "
+            const { ASSETS } = await import('./js/assets.js');
+            const must = { js: /javascript/, mjs: /javascript/ };
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            let bad = 0;
+            for (const p of ['js/ocr-worker.js', ...Object.keys(ASSETS)]) {
+              let r = null;
+              // A file just published may take a moment to show up.
+              for (let i = 0; i < 6; i++) {
+                r = await fetch(new URL(p, process.env.BASE), { method: 'HEAD' }).catch(() => null);
+                if (r?.ok) break;
+                await sleep(10000);
+              }
+              const type = r?.headers.get('content-type') || '';
+              const ok = !!r?.ok && (must[p.split('.').pop()] || /./).test(type);
+              console.log(ok ? 'ok ' : 'BAD', p, r?.status, type, r?.headers.get('content-encoding') || '');
+              bad += !ok;
+            }
+            process.exit(bad ? 1 : 0);
+          "

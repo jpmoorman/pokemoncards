@@ -1,5 +1,5 @@
 // Photo -> ranked card matches. Used by the live scanner and by batch processing.
-import { getWorker, readCard, readStamps } from './ocr.js';
+import { getWorker, readCard, readStamps, holdReader } from './ocr.js';
 import { rankCandidates, findNamesInText } from './match.js';
 import { rerank, lookupIds, borderColor } from './rerank.js';
 import { catalog, catalogReady, abbrReady } from './catalog.js';
@@ -24,7 +24,17 @@ const DETAILS_WAIT_AFTER = 150; // at least, after the artwork: copies saved on 
  * are looked up (while the artwork is read, if it is), and skipped if they don't come in
  * time (offline).
  */
-export async function identify(canvas, onStatus, { stamps = true } = {}) {
+export async function identify(canvas, onStatus, opts = {}) {
+  // The reader stays up between this scan's reads, also with the app in the background.
+  const release = holdReader();
+  try {
+    return await identifyHeld(canvas, onStatus, opts);
+  } finally {
+    release();
+  }
+}
+
+async function identifyHeld(canvas, onStatus, { stamps = true }) {
   onStatus?.('Loading text recognition…');
   const ready = catalogReady();
   ready.catch(() => {}); // reported below, after reading

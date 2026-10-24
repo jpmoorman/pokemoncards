@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { startHarness, results } from './harness.mjs';
+import { startHarness, results, root } from './harness.mjs';
 import { splitOf, sheetCard, scorePrinting, printingSummary, printingReport } from './printing.mjs';
 
 const arg = (name, def) => {
@@ -33,6 +33,15 @@ const outFile = arg('out', path.join(results, 'bench.json'));
 const split = arg('split', 'all');
 const splitBy = arg('split-by', 'photo');
 const saveCards = arg('save-cards', '');
+// What the bench writes holds what was read off the private photos (--save-cards: the cards
+// themselves): never inside this public repo, except its ignored test-results/ folder.
+for (const [flag, p] of [['out', outFile], ['save-cards', saveCards]]) {
+  const rel = p && path.relative(root, path.resolve(p));
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.startsWith(`test-results${path.sep}`)) {
+    console.error(`--${flag} ${p} is inside the app's repo, which is public: use test-results/ or a folder outside it (e.g. ../bench-dev.json).`);
+    process.exit(1);
+  }
+}
 if (saveCards) fs.mkdirSync(saveCards, { recursive: true });
 
 const labels = JSON.parse(fs.readFileSync(path.join(dir, 'labels.json')))

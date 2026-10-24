@@ -394,7 +394,8 @@ for (const [style, fill, stroke] of [['white number', '#fff', '#111'], ['outline
   t.check('two scans at once read the same as each alone', r.alone[0] === r.together[0] && r.alone[1] === r.together[1] && r.alone[0] !== r.alone[1], JSON.stringify(r));
 }
 
-// 9) The reader stops when idle (giving its memory back) and starts again for the next scan.
+// 9) A stopped reader (as when idle or in the background, giving its memory back; see
+// e2e-ocr for when it stops) starts again for the next scan.
 {
   const png = await makeCard(page, CARDS.aurorus);
   const r = await page.evaluate(async (b64) => {

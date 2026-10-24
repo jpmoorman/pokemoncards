@@ -21,7 +21,7 @@ export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export const DIRS = ['models', 'vendor', 'data'];
 const LAZY = []; // e.g. 'models/mobilenet-1/'
 const OUT = path.join(root, 'js/assets.js');
-const SKIP = /(^|\/)(\.|README|LICENSE|NOTICE)/i; // notes kept next to the files aren't downloaded by the app
+const SKIP = /(^|\/)(\.|README|LICENSE|NOTICE|ThirdPartyNotices)/i; // notes kept next to the files aren't downloaded by the app
 
 /** Every shipped file: [{ path: 'data/details-….json', bytes, integrity: 'sha256-…', lazy? }], sorted by path. */
 export function listAssets(dir = root) {

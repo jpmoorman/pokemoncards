@@ -19,6 +19,14 @@ test('sw.js can read the list from its saved copy of js/assets.js (plain JSON af
   assert.deepEqual(parsed, (await import('../js/assets.js')).ASSETS);
 });
 
+test('licence and notice files next to the big files are published but not downloaded by the app', () => {
+  const listed = listAssets().map((a) => a.path);
+  for (const f of ['models/ppocr-v6tiny-1/LICENSE', 'vendor/onnxruntime-web-1.30.0/LICENSE', 'vendor/onnxruntime-web-1.30.0/ThirdPartyNotices.txt', 'data/LICENSE', 'data/README.md']) {
+    assert.ok(fs.existsSync(path.join(root, f)), `${f} is missing`);
+    assert.ok(!listed.includes(f), `${f} is listed as a big file`);
+  }
+});
+
 test('big files are only under models/, vendor/ and data/, each version in its own name', () => {
   for (const a of listAssets()) {
     assert.match(a.path, /^(models|vendor|data)\/[\w.@+-]+(\/[\w.@+-]+)*$/, a.path);

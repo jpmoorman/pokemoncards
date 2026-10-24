@@ -192,7 +192,9 @@ function renderDebug() {
   const { debug } = sheet;
   $('#debug-wrap').hidden = !debug;
   if (!debug) return;
-  $('#debug').textContent = Object.entries({ 'CARD OUTLINE': debug.detect, 'NAME AREA': debug.name, 'BOTTOM AREA': debug.bottom, ARTWORK: debug.art, 'WHOLE CARD': debug.full })
+  // Which text reader read it: Tesseract only where PP-OCR can't run (and why).
+  const reader = { ppocr: 'PP-OCR', tesseract: `Tesseract${debug.fallback ? ` (${debug.fallback})` : ''}` }[debug.engine];
+  $('#debug').textContent = Object.entries({ 'TEXT READER': reader, 'CARD OUTLINE': debug.detect, 'NAME AREA': debug.name, 'BOTTOM AREA': debug.bottom, ARTWORK: debug.art, 'WHOLE CARD': debug.full })
     .filter(([, v]) => v)
     .map(([k, v]) => `${k}:\n${v}`)
     .join('\n\n');

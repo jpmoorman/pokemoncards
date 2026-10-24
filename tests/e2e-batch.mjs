@@ -506,11 +506,17 @@ t.check(
 // ---- a scan finishing while a batch review sheet is open doesn't take the sheet over ----
 const scanPhoto = await png(CARDS.baseCharizard);
 await page.click('.tab[data-view="scan"]');
-const cdp = await page.context().newCDPSession(page);
-await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 }); // phone speed: the scan takes a few seconds
 await page.evaluate(() => {
   window.__busy = [];
   document.addEventListener('scan:busy', (e) => window.__busy.push(e.detail.busy));
+  // The scan's text reads wait until the review sheet is open (on a phone the scan takes a
+  // few seconds; here it might end before the sheet opens).
+  window.__post = Worker.prototype.postMessage;
+  window.__holdReads = new Promise((r) => (window.__releaseReads = r));
+  Worker.prototype.postMessage = function (msg, ...rest) {
+    if (msg?.type !== 'read') return window.__post.call(this, msg, ...rest);
+    window.__holdReads.then(() => window.__post.call(this, msg, ...rest));
+  };
 });
 await page.setInputFiles('#file-input-library', scanPhoto);
 await page.waitForSelector('#guide.busy');
@@ -518,8 +524,11 @@ await page.click('.tab[data-view="batch"]');
 await page.click('#batch-list .bitem:nth-child(1) .b-main');
 await page.waitForSelector('#sheet:not([hidden]) .actions .btn:has-text("Use this card")');
 const scanning = await page.evaluate(() => document.querySelector('#guide').classList.contains('busy'));
+await page.evaluate(() => {
+  Worker.prototype.postMessage = window.__post;
+  window.__releaseReads();
+});
 await page.waitForFunction(() => !document.querySelector('#guide.busy'), null, { timeout: 120000 });
-await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
 const busyEvents = await page.evaluate(() => window.__busy.join());
 t.check('a scan on the Scan tab says when it starts and ends (scan:busy), so Batch can wait', busyEvents === 'true,false', busyEvents);
 const kept = await page.evaluate(() => ({

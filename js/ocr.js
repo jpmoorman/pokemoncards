@@ -4,6 +4,7 @@
 import { parseBottomText, parseLabelNumbers, pickName, normalize } from './parse.js';
 import { CARD_ASPECT, detectCard, warpCard, rotateCorners } from './detect.js';
 import { catalog } from './catalog.js';
+import { emit } from './ui.js';
 
 // A Pokémon card is 63 × 88 mm.
 export { CARD_ASPECT };
@@ -164,13 +165,15 @@ export function nextPaint() {
 // ---------- the text reader ----------
 
 // PP-OCR runs on onnxruntime-web, which needs WebAssembly SIMD (Safari from iOS 16.4, every
-// current Chrome); without it the Tesseract fallback reads instead. This is the smallest
-// module using a SIMD instruction.
+// current Chrome); without it the Tesseract fallback reads instead. The app itself needs iOS
+// 16.4 too (its regular expressions), so on an iPhone the fallback only covers a runtime that
+// won't start. This is the smallest module using a SIMD instruction.
 const SIMD_PROBE = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
 // The worker is stopped after this long without a read, to give its memory back (the
-// runtime's memory only grows); longer while the camera is open, as more scans are coming,
-// and soon once the app is in the background (a phone keeps a page with less memory, and a
-// batch going on in the background keeps reading).
+// runtime's memory only grows); longer while the camera is open, as more scans are coming.
+// In the background it is stopped as soon as nothing holds it (see holdReader): a phone may
+// freeze a hidden page's timers, and that is when it closes apps to free memory. A scan or
+// batch going on in the background is checked again this often (`hidden`).
 const IDLE_MS = { camera: 5 * 60e3, none: 60e3, hidden: 5e3 };
 // A read that hasn't come back after this long never will (the worker was stopped by the
 // browser): the worker is restarted. Starting up fails after STALL_MS without progress: a
@@ -179,13 +182,13 @@ const IDLE_MS = { camera: 5 * 60e3, none: 60e3, hidden: 5e3 };
 const READ_TIMEOUT_MS = 45e3;
 const STALL_MS = { download: 5 * 60e3, runtime: 60e3 };
 
-let reader = null; // Promise of { kind: 'ppocr', worker } or { kind: 'tesseract', mod }
+let reader = null; // Promise of { kind: 'ppocr' } (the worker is `worker`) or { kind: 'tesseract', mod, why }
 let progressCb = null;
 let worker = null;
 let nextId = 1;
-const waiting = new Map(); // job id -> { w (the worker it went to), resolve, reject }
+const waiting = new Map(); // job id -> { w (the worker it went to), type, resolve, reject }
 let idleTimer = null;
-let busy = 0;
+let busy = 0; // reads going on, and scans or batches that hold the reader (holdReader)
 
 function canRunPpocr() {
   try {
@@ -210,6 +213,7 @@ function ask(type, data = {}, transfer = []) {
       }, READ_TIMEOUT_MS);
     waiting.set(id, {
       w,
+      type,
       resolve: (v) => (clearTimeout(timer), resolve(v)),
       reject: (e) => (clearTimeout(timer), reject(e)),
     });
@@ -268,6 +272,9 @@ function startPpocr() {
         const err = new Error(m.error);
         err.runtime = m.stage === 'runtime';
         p.reject(err);
+        // A read that failed in the runtime (out of memory, say) may have left it unusable:
+        // the next read starts a fresh worker.
+        if (err.runtime && p.type !== 'init' && worker === w) stopReader();
       } else p.resolve(m.ok);
     };
     // A worker that dies (a browser without module workers, out of memory) takes its jobs with it.
@@ -293,6 +300,7 @@ function startPpocr() {
 }
 
 async function start() {
+  let why = 'no WebAssembly SIMD';
   if (canRunPpocr()) {
     try {
       return await startPpocr();
@@ -302,11 +310,14 @@ async function start() {
       if (e.stopped) throw new Error('The text reader stopped. Try again.');
       if (!e.runtime) throw new Error('Could not load the text-recognition engine. Check your connection.');
       console.warn('PP-OCR cannot run here, reading with Tesseract instead', e);
+      why = `PP-OCR could not start: ${e.message || e}`;
+      // Not expected on a phone that can run it: said once (app.js), so it doesn't go unnoticed.
+      if (typeof document !== 'undefined') emit('reader:fallback', { why });
     }
   }
   const mod = await import('./ocr-tesseract.js');
   await mod.getWorker((m) => progressCb?.(m));
-  return { kind: 'tesseract', mod };
+  return { kind: 'tesseract', mod, why };
 }
 
 /**
@@ -338,32 +349,54 @@ export function stopReader() {
   const w = worker;
   worker = null;
   reader = null;
-  const err = new Error('text reader stopped');
+  // What a scan waiting on it says (app.js shows it).
+  const err = new Error('The text reader stopped. Try again.');
   err.stopped = true;
   dropJobs(w, err);
   w.terminate();
 }
 
-/** Arm the idle stop (see IDLE_MS). */
+/** Arm the idle stop (see IDLE_MS); in the background with nothing to read, stop now. */
 function idle() {
   clearTimeout(idleTimer);
   if (!worker) return;
-  const ms = typeof document !== 'undefined' && document.hidden ? IDLE_MS.hidden : camerasOpen ? IDLE_MS.camera : IDLE_MS.none;
+  const hidden = typeof document !== 'undefined' && document.hidden;
+  if (hidden && !busy) return stopReader();
+  const ms = hidden ? IDLE_MS.hidden : camerasOpen ? IDLE_MS.camera : IDLE_MS.none;
   idleTimer = setTimeout(() => (busy ? idle() : stopReader()), ms);
+}
+
+/**
+ * Keep the reader running while more reads are coming (the several reads of one scan, a
+ * batch), also in the background. Returns the function that lets it go again.
+ */
+export function holdReader() {
+  busy++;
+  clearTimeout(idleTimer);
+  let held = true;
+  return () => {
+    if (!held) return;
+    held = false;
+    busy--;
+    idle();
+  };
 }
 
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     idle();
-    // Back with the camera open: ready again while the card is lined up.
+    // Back with the camera open: ready again while the card is lined up (startCamera warms
+    // it up too).
     if (!document.hidden && camerasOpen) warmUp();
   });
+  // Leaving the page (or the phone keeping it for "back"): nothing more to read here.
+  window.addEventListener('pagehide', () => busy || stopReader());
 }
 
-/** How the reader is doing, for the bench page: { engine, wasmBytes }. */
+/** How the reader is doing, for the bench page: { engine, wasmBytes, fallback (why not PP-OCR) }. */
 export async function readerStats() {
   const r = await getWorker();
-  if (r.kind !== 'ppocr') return { engine: r.kind, wasmBytes: null };
+  if (r.kind !== 'ppocr') return { engine: r.kind, wasmBytes: null, fallback: r.why };
   return { engine: r.kind, ...(await ask('stats')) };
 }
 
@@ -378,10 +411,9 @@ const SEND_PIXELS = 2.6e6;
  * [x0, y0, x1, y1] in canvas pixels.
  */
 async function readAreas(canvas, areas) {
-  await getWorker();
-  busy++;
-  clearTimeout(idleTimer);
+  const release = holdReader();
   try {
+    await getWorker();
     const W = canvas.width;
     const H = canvas.height;
     const sx = Math.max(0, Math.floor(Math.min(...areas.map((a) => a.x)) * W));
@@ -409,8 +441,7 @@ async function readAreas(canvas, areas) {
     for (const a of res) for (const l of a.lines) l.box = [sx + l.box[0] * fx, sy + l.box[1] * fy, sx + l.box[2] * fx, sy + l.box[3] * fy];
     return res;
   } finally {
-    busy--;
-    idle();
+    release();
   }
 }
 
@@ -618,7 +649,11 @@ export async function cardViews(canvas, onStatus, debug) {
  */
 export async function readCard(canvas, onStatus, opts = {}) {
   const r0 = await getWorker();
-  if (r0.kind === 'tesseract') return r0.mod.readCard(canvas, onStatus, opts);
+  if (r0.kind === 'tesseract') {
+    const res = await r0.mod.readCard(canvas, onStatus, opts);
+    res.debug.fallback = r0.why;
+    return res;
+  }
   const debug = { name: '', bottom: '', full: '', detect: '', reads: 0, steps: [], engine: 'ppocr' };
   const read = (card, areas) => {
     debug.reads += areas.length;
@@ -657,6 +692,12 @@ export async function readCard(canvas, onStatus, opts = {}) {
   // The right way up: a number, or the name line read clearly.
   const upright = (r) => numberFound(r.bottom) || clearName(r.name.best);
   const knownName = (r) => isKnown(r.name.best) || isKnown(r.text);
+  // How well a view's name line or name area reads as a known card name (0: not at all).
+  const knownScore = (text) => {
+    const k = lookup(text);
+    return k === undefined ? +!!text : k && k.score >= KNOWN ? k.score : 0;
+  };
+  const nameScore = (r) => Math.max(knownScore(r.name.best), knownScore(r.text));
   const summary = (r) => `${r.v.how}: name "${r.name.best}"${knownName(r) ? ' (known)' : ''}, ${numberFound(r.bottom) ? `number ${r.bottom.numbers[0].text}` : 'no number'}`;
 
   const tried = [];
@@ -696,7 +737,9 @@ export async function readCard(canvas, onStatus, opts = {}) {
           break;
         }
       }
-      if (!turn && !knownName(first)) turn = tried.slice(1).find(knownName) || null;
+      // Of those, the one that reads most like a card name: text read the wrong way up can hold
+      // a short name too ("Nessa" in junk, against "Biissey" the right way up).
+      if (!turn && !knownName(first)) for (const t of tried.slice(1)) if (nameScore(t) > (turn ? nameScore(turn) : 0)) turn = t;
       if (turn) {
         use(turn);
         turned = true;

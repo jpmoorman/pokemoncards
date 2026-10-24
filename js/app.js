@@ -61,6 +61,14 @@ async function init() {
   catalogReady()
     .catch(() => {})
     .then(() => requestAnimationFrame(() => setTimeout(warmUp, 300)));
+  // The faster text reader (PP-OCR) should run on any phone that has it: say so if it didn't
+  // start, once (the result sheet's raw text says which reader read a card, and why).
+  let toldFallback = false;
+  on('reader:fallback', () => {
+    if (toldFallback) return;
+    toldFallback = true;
+    toast("The faster text reader couldn't start on this phone, so scans use a slower one (it needs a connection to download).", 6000);
+  });
 
   // Start the camera straight away if permission was already granted.
   try {

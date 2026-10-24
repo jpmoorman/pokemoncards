@@ -1,6 +1,8 @@
 // Fallback text reader: Tesseract.js, for browsers that can't run the PP-OCR models (no
-// WebAssembly SIMD: iOS before 16.4). Loaded by ocr.js only then, so it downloads Tesseract
-// (~5 MB from jsDelivr) only on those phones. Same results as ocr.js's readCard/readStamps.
+// WebAssembly SIMD, or its runtime won't start; the app as a whole needs iOS 16.4 or newer,
+// which has SIMD). Loaded by ocr.js only then, so it downloads Tesseract (~4.5 MB from
+// jsDelivr, kept by the browser's cache, not the app's) only on those phones. Same results as
+// ocr.js's readCard/readStamps.
 import { parseBottomText, parseLabelNumbers, pickName } from './parse.js';
 import { NAME_REGION, NUMBER_REGIONS, NUMBER_SPOTS, STAMP_REGION, KNOWN, cardViews, numberFound, mergeBottom, setSizes, nextPaint } from './ocr.js';
 
@@ -260,14 +262,6 @@ async function recognize(canvas, psm, { adaptive = false } = {}) {
     }
   }
   return { text: data.text || '', lines };
-}
-
-/**
- * OCR one area of a straightened card. region is in fractions of the card
- * ({ x, y, w, h }, e.g. ART_REGION). Returns { text, lines: [{ text, height, conf, y }] }.
- */
-export async function readRegion(card, region, { psm = 11, invert = false, targetW = 1600 } = {}) {
-  return recognize(enhance(crop(card, region, targetW), invert), psm);
 }
 
 /** Text on the lower artwork, where set logos, 1st Edition and other stamps sit (for stamps.js). */

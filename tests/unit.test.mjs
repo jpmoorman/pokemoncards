@@ -115,6 +115,19 @@ test('name only returns all printings', () => {
   assert.notEqual(confidence(r), 'high');
 });
 
+test('a tie, or a same-name card a doubled digit away, is never "high"', () => {
+  const r = (id, name, num, score) => ({ card: { id, setId: id.split('-')[0], name, num }, score, reasons: [] });
+  // "55" read as "5": dp6-55 shares the name, one digit doubled.
+  assert.equal(confidence([r('dp6-5', 'Gliscor', 5, 10.5), r('dp6-55', 'Gliscor', 55, 7.9), r('dp6-6', 'Glameow', 6, 5)]), 'medium');
+  assert.equal(confidence([r('sv04.5-14', 'Charcadet', 14, 10.5), r('sv04.5-114', 'Charcadet', 114, 7.9)]), 'medium');
+  // ...not another name, nor another set.
+  assert.equal(confidence([r('dp6-5', 'Gliscor', 5, 10.5), r('dp6-55', 'Gligar', 55, 7.9)]), 'high');
+  assert.equal(confidence([r('dp6-5', 'Gliscor', 5, 10.5), r('pl1-55', 'Gliscor', 55, 7.9)]), 'high');
+  // Tied: a guess between them.
+  assert.equal(confidence([r('base1-63', 'Squirtle', 63, 7.88), r('lc-95', 'Squirtle', 95, 7.88)]), 'low');
+  assert.equal(confidence([r('base1-63', 'Squirtle', 63, 7.88), r('lc-95', 'Squirtle', 95, 7.5)]), 'medium');
+});
+
 test('confidence is high for a clean scan', () => {
   const r = rankCandidates(index, { nameBest: 'Charizard ex', nameAll: '', numbers: [{ prefix: '', num: 125, total: 197 }], setCodes: ['OBF'], codeCandidates: [] }, catalog.abbr);
   assert.equal(confidence(r), 'high');

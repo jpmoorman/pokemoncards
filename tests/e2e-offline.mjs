@@ -69,7 +69,13 @@ const context = await browser.newContext({ viewport: { width: 390, height: 844 }
 await stubNetwork(context, origin);
 // Registered last, so it runs first: no other site answers while offline.
 await context.route(/^https:\/\//, (r) => (offline ? r.abort('internetdisconnected') : r.fallback()));
-await context.addInitScript(() => (window.SERVICE_WORKER_ON_HTTP = true));
+await context.addInitScript(() => {
+  window.SERVICE_WORKER_ON_HTTP = true;
+  // Every toast shown on this page.
+  window.__toasts = [];
+  const seen = new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => n.classList?.contains('toast') && window.__toasts.push(n.textContent))));
+  document.addEventListener('DOMContentLoaded', () => seen.observe(document.body, { childList: true }));
+});
 const logs = [];
 const page = await context.newPage();
 page.on('pageerror', (e) => logs.push(`pageerror: ${e.message}`));
@@ -128,10 +134,14 @@ await appReady();
 await page.waitForFunction(() => navigator.serviceWorker?.controller, null, { timeout: 30000 });
 const first = await waitSaved(listed);
 t.check(`first visit: the service worker saves all ${listed.length} big files in the background`, listed.every((p) => first.includes(p)), first.join(', '));
+const toldReady = await page.waitForFunction(() => window.__toasts.includes('Ready to scan without a connection'), null, { timeout: 10000 }).then(() => true, () => false);
 
 // The Home Screen app's first start (everything now comes through the service worker), online:
 // scan a card and save it.
 await start();
+await page.waitForTimeout(1500);
+const toldAgain = await page.evaluate(() => window.__toasts.filter((x) => /without a connection/.test(x)).length);
+t.check('once they are all saved the app says it can scan without a connection, once', toldReady && toldAgain === 0, JSON.stringify({ toldReady, toldAgain }));
 const online = await scan(CARDS.charizardEx);
 await page.click('.actions .btn:has-text("Add to collection")');
 await page.click('.sheet-close');

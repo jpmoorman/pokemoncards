@@ -365,17 +365,33 @@ function clearWithout(ranked) {
 }
 
 /**
+ * Another card of the same name in the same set whose number is the top match's with a digit
+ * doubled (dp6-5 and dp6-55 Gliscor): the text reader can merge a doubled digit ("55" read as
+ * "5"), so the number read doesn't rule it out.
+ */
+function doubledDigitTwin(ranked) {
+  const [a] = ranked;
+  const n = String(a.card.num ?? '');
+  const doubled = new Set([...n].map((_, i) => +(n.slice(0, i + 1) + n.slice(i))));
+  return ranked.some((r) => r !== a && r.card.setId === a.card.setId && r.card.name === a.card.name && doubled.has(r.card.num));
+}
+
+/**
  * Rough confidence label for the top result: 'high' | 'medium' | 'low' | 'none'.
  * Never 'high' when the top match has a reprint-collection twin the evidence can't rule out
- * (see reprintRivals), nor when card details came for only some of the close matches (rerank.js
- * marks the others `unchecked`) unless the scan is just as clear without any details.
+ * (see reprintRivals) or a same-name card a doubled digit away (doubledDigitTwin), nor when
+ * card details came for only some of the close matches (rerank.js marks the others
+ * `unchecked`) unless the scan is just as clear without any details. Tied with another card
+ * (other than a reprint twin, which the result sheet offers in a note) it is a guess: 'low'.
  */
 export function confidence(ranked) {
   if (!ranked.length) return 'none';
   const [a, b] = ranked;
   const gap = b ? a.score - b.score : a.score;
-  if (a.score >= 8 && gap >= CONFIDENT_GAP && !reprintRivals(ranked).length && (!ranked.some((r) => r.unchecked) || clearWithout(ranked))) return 'high';
-  if (a.score >= 6) return 'medium';
+  const twins = reprintRivals(ranked);
+  if (a.score >= 8 && gap >= CONFIDENT_GAP && !twins.length && !doubledDigitTwin(ranked) && (!ranked.some((r) => r.unchecked) || clearWithout(ranked))) return 'high';
+  const tied = ranked.some((r) => r !== a && Math.abs(r.score - a.score) < 1e-9 && !twins.includes(r));
+  if (a.score >= 6 && !tied) return 'medium';
   return 'low';
 }
 

@@ -687,7 +687,7 @@ async function run() {
   $('run').textContent = 'Run again';
   $('copy').disabled = false;
   $('share').disabled = false;
-  setStatus(`Done in ${results.totalSeconds} s. Tap "Copy results" and paste them into the chat.`);
+  setStatus(`Done in ${results.totalSeconds} s. Tap "Copy results" and send them to whoever asked for them.`);
 }
 
 // ---------- results ----------
@@ -891,7 +891,7 @@ async function copy() {
   const text = copyText();
   try {
     await navigator.clipboard.writeText(text);
-    setStatus('Copied. Paste the results into the chat.');
+    setStatus('Copied. Paste the results into a message to whoever asked for them.');
     $('copy-box').hidden = true;
     return;
   } catch {

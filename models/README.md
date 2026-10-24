@@ -15,14 +15,19 @@ keep these files for good, and an app update never downloads them again.
 | `dict.txt` | The recognizer's 126 characters, one per line (class 0 is "blank", the last is a space) | 295 | 259 | `5d35f53aa94e8db26662ad5218440eccc7cb162df801c6db2fe5e2931ca125c4` |
 
 **Source.** PaddlePaddle's official inference weights:
-- [huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det](https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det)
-- [huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec](https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec)
+- [huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det](https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det), revision `d3177d4e5551463292a61e27cfca2b53e7c3fe9d`
+- [huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec](https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec), revision `0736086f72f666350ebcdc0c3a504eeac89cdfad`
 
-**Licence.** Apache License 2.0 (PaddleOCR and its models).
+**Licence.** Apache License 2.0: both model cards say `license: apache-2.0`, as does PaddleOCR
+itself. The licence text is in `ppocr-v6tiny-1/LICENSE`. These files are modified versions of the
+models: see the next paragraph for what was changed.
 
-**How the files were made.** A GitHub Actions job in the private test-photo repo did the export
-(`tools/ocr_models/`, branch `ocr-models`). It used paddlepaddle 3.4.0, paddle2onnx 2.1.0, onnx
-1.17.0 and onnxruntime 1.31.0:
+**How the files were made.** A GitHub Actions job ran `tools/ocr_models/run.sh` (with
+`export.py`; the job lives in the private test-photo repo, but the scripts only download the
+public weights above and are in this repo). It used paddlepaddle 3.4.0, paddle2onnx 2.1.0, onnx
+1.17.0 and onnxruntime 1.31.0. It now also keeps the model cards and logs the revision of the
+weights: run again on 2026-10-24, from the revisions above, it gave exactly the files here (same
+SHA-256). The steps:
 1. Download the weights above.
 2. Convert them with `paddle2onnx`: opset 14 for the detector, 11 for the recognizer.
 3. Shrink them, as `shrink.py` in the review's spike did:

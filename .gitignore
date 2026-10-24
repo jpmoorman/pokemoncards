@@ -1,3 +1,10 @@
 node_modules/
 test-results/
 *.log
+# Bench output (tests/bench.mjs refuses to write it here, but just in case): what was read off
+# the private test photos, and their straightened cards.
+/bench*.json
+/cards*/
+# What tools/ocr_models/run.sh downloads and writes.
+/out/
+/work/

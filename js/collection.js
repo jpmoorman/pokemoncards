@@ -208,21 +208,23 @@ async function importBackup(file) {
   }
   const items = loadCollection();
   const trade = savedTrade();
+  const takesCards = data.collection.length > 0;
   const takesTrade = !!data.trade;
-  if (!data.collection.length && !takesTrade) {
+  if (!takesCards && !takesTrade) {
     toast('That backup has no saved cards.', 4000);
     return;
   }
-  // Anything saved here is replaced (not merged): ask first.
-  const replaces = [items.length && `the ${cardCount(items)} saved here`, takesTrade && trade && 'your current trade'].filter(Boolean);
+  // What the backup has replaces what is saved here (not merged): ask first. A backup with only
+  // a trade in it leaves the saved cards alone.
+  const replaces = [takesCards && items.length && `the ${cardCount(items)} saved here`, takesTrade && trade && 'your current trade'].filter(Boolean);
   if (replaces.length) {
-    const what = [data.collection.length && cardCount(data.collection), takesTrade && 'a trade'].filter(Boolean).join(' and ');
+    const what = takesCards ? [cardCount(data.collection), takesTrade && 'a trade'].filter(Boolean).join(' and ') : 'trade';
     if (!(await confirmDialog(`Replace ${replaces.join(' and ')} with the backup's ${what}?`, 'Replace'))) return;
   }
-  save(data.collection.map((e) => ({ ...e, key: entryKey(e) })));
+  if (takesCards) save(data.collection.map((e) => ({ ...e, key: entryKey(e) })));
   if (takesTrade) restoreTrade(data.trade);
   renderCollection();
-  toast(`Imported ${cardCount(data.collection)}${takesTrade ? ' and your trade' : ''}`, 3000);
+  toast(takesCards ? `Imported ${cardCount(data.collection)}${takesTrade ? ' and your trade' : ''}` : 'Imported your trade', 3000);
   persistStorage();
 }
 

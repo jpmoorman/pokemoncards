@@ -20,7 +20,7 @@
 //   forTrade - side it was photographed for (Scan in "Adding cards to" mode), until it is sent
 import { $, el, emit, on, toast, actionToast, confirmDialog, navigate, restack } from './ui.js';
 import { kvGet, getCard } from './api.js';
-import { fileToCanvas } from './ocr.js';
+import { fileToCanvas, holdReader } from './ocr.js';
 import { identify } from './identify.js';
 import { confidence } from './match.js';
 import { catalog, catalogReady } from './catalog.js';
@@ -448,31 +448,37 @@ async function processAll(only) {
     return;
   }
   keepAwake(true);
+  // The text reader stays up between photos, also with the app in the background.
+  const release = holdReader();
   const before = new Set(items.filter(needsCheck).map((i) => i.id));
   let found = 0;
   let failed = 0;
-  for (let it = untried()[0]; it && !run.stop; it = untried()[0]) {
-    if (scanDone) {
-      // A scan on the Scan tab goes first (text recognition is shared); the list may change meanwhile.
-      progress('Paused while your scan finishes…');
-      // Stop works during the pause too, not only once the scan ends.
-      await new Promise((resolve) => {
-        run.wake = resolve;
-        scanDone.then(resolve);
-      });
-      run.wake = null;
-      continue;
+  try {
+    for (let it = untried()[0]; it && !run.stop; it = untried()[0]) {
+      if (scanDone) {
+        // A scan on the Scan tab goes first (text recognition is shared); the list may change meanwhile.
+        progress('Paused while your scan finishes…');
+        // Stop works during the pause too, not only once the scan ends.
+        await new Promise((resolve) => {
+          run.wake = resolve;
+          scanDone.then(resolve);
+        });
+        run.wake = null;
+        continue;
+      }
+      tried.add(it.id);
+      run.index = tried.size;
+      run.total = tried.size + untried().length;
+      await processItem(it);
+      if (!items.includes(it)) continue; // deleted meanwhile
+      if (it.status === 'matched') found++;
+      if (it.status === 'error') failed++;
+      persist();
+      changed();
+      render();
     }
-    tried.add(it.id);
-    run.index = tried.size;
-    run.total = tried.size + untried().length;
-    await processItem(it);
-    if (!items.includes(it)) continue; // deleted meanwhile
-    if (it.status === 'matched') found++;
-    if (it.status === 'error') failed++;
-    persist();
-    changed();
-    render();
+  } finally {
+    release();
   }
   const stopped = run.stop;
   Object.assign(run, { active: false, stop: false, msg: '' });
