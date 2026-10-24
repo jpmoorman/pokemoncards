@@ -295,6 +295,18 @@ test('only the best few are looked up', () => {
   assert.deepEqual(lookupIds([], baseRead, { index }), []);
 });
 
+test('a reprint is looked up with its original, however many printings tie on the name', async () => {
+  // Reprint copies sort after every card they tie with; looked up only as far as `fetch`
+  // goes, they would never get their details, and the original would win silently.
+  const read = { clues: clues({ nameBest: 'Charizard', nameAll: 'Charizard' }), debug: { name: 'Charizard 120 HP', full: 'Fire Spin' }, border: YELLOW };
+  const asked = lookupIds(first(read.clues), read, { index, fetch: 1 });
+  assert.deepEqual([...asked].sort(), ['30th-c-001', 'base1-4', 'cel25cc-CC002']);
+  const ranked = await rerank(first(read.clues), read, { index, getCard: (id) => details[id], fetch: 1 });
+  assert.equal(ranked[0].card.id, 'base1-4');
+  assert.deepEqual(reprintRivals(ranked).map((r) => r.card.id).sort(), ['30th-c-001', 'cel25cc-CC002']);
+  assert.notEqual(confidence(ranked), 'high');
+});
+
 test('ties: main expansion first, then the original printing, then the regular number', async () => {
   assert.ok(isSpecialSet('basep') && isSpecialSet('cel25cc') && isSpecialSet('swsh9tg') && isSpecialSet('2021swsh'));
   assert.ok(!isSpecialSet('base1') && !isSpecialSet('sv03.5') && !isSpecialSet('swsh9'));

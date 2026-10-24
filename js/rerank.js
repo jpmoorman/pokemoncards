@@ -396,10 +396,13 @@ function withHints(ranked, f, index) {
 
 /** The candidates worth looking up: the best few, and only those close enough to the best for their details to matter. */
 function pick(list, max) {
-  return list
-    .slice(0, max)
-    .filter((r) => r.score >= list[0].score - W.fetchGap)
-    .map((r) => r.card.id);
+  const close = (r) => r.score >= list[0].score - W.fetchGap;
+  const ids = list.slice(0, max).filter(close).map((r) => r.card.id);
+  // A reprint-collection copy sorts after every card it ties with (match.js): with many
+  // printings tied on the name it would never be looked up, its original would win on
+  // details alone, and no reprint note would show. It is looked up with its original.
+  for (const r of list) if (r.card.reprintOf && ids.includes(r.card.reprintOf) && !ids.includes(r.card.id) && close(r)) ids.push(r.card.id);
+  return ids;
 }
 
 /**
