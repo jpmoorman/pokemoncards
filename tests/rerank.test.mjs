@@ -274,6 +274,16 @@ test('reprint collections print the original number: found by it, ranked after t
   assert.ok(!first(clues({ numbers: [{ prefix: '', num: 1, total: null }] })).some((r) => r.card.id === '30th-c-001'));
 });
 
+test('only the original\'s details came: the reprints share them and stay in the note', async () => {
+  const read = { ...baseRead, clues: clues({ nameBest: 'Charizard', numbers: [{ prefix: '', num: 4, total: 102 }] }) };
+  read.debug = { ...read.debug, bottom: 'Illus. Mitsuhiro Arita ©1995, 96, 98 Nintendo, Creatures, GAMEFREAK. 4/102' };
+  const onlyOriginal = (id) => (id === 'base1-4' ? details[id] : Promise.reject(new Error('offline')));
+  const ranked = await rerank(first(read.clues), read, { index, getCard: onlyOriginal });
+  assert.equal(ranked[0].card.id, 'base1-4');
+  assert.deepEqual(reprintRivals(ranked).map((r) => r.card.id).sort(), ['30th-c-001', 'cel25cc-CC002']);
+  assert.equal(confidence(ranked), 'medium');
+});
+
 test('"Wizards" in the copyright line rules the reprints out', async () => {
   const read = { ...baseRead, clues: clues({ nameBest: 'Charizard', numbers: [{ prefix: '', num: 4, total: 102 }] }) };
   assert.ok(readFeatures(read).wizards);

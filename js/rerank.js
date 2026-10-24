@@ -447,6 +447,14 @@ export async function rerank(ranked, read, ctx = {}) {
     clearTimeout(timer);
   }
   if (!ids.length) return out;
+  // A reprint-collection copy prints its original's text, so when only one of the two came,
+  // its details stand in for the other's (else the reprint drops out of the sheet's note).
+  for (const r of out) {
+    const { id, reprintOf: of } = r.card;
+    if (!of) continue;
+    if (ids.includes(id) && !got.has(id) && got.has(of)) got.set(id, got.get(of));
+    else if (ids.includes(of) && !got.has(of) && got.has(id)) got.set(of, got.get(id));
+  }
   // Every candidate keeps its score without details (hinted); one whose details were wanted
   // but didn't come is marked unchecked (match.confidence then says "high" only if the scan is
   // just as clear without any details).
