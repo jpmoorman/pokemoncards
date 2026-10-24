@@ -124,8 +124,8 @@ test('a tie, or a same-name card a doubled digit away, is never "high"', () => {
   assert.equal(confidence([r('dp6-5', 'Gliscor', 5, 10.5), r('dp6-55', 'Gligar', 55, 7.9)]), 'high');
   assert.equal(confidence([r('dp6-5', 'Gliscor', 5, 10.5), r('pl1-55', 'Gliscor', 55, 7.9)]), 'high');
   // Tied: a guess between them.
-  assert.equal(confidence([r('base1-63', 'Squirtle', 63, 7.88), r('lc-95', 'Squirtle', 95, 7.88)]), 'low');
-  assert.equal(confidence([r('base1-63', 'Squirtle', 63, 7.88), r('lc-95', 'Squirtle', 95, 7.5)]), 'medium');
+  assert.equal(confidence([r('base1-63', 'Squirtle', 63, 7), r('lc-95', 'Squirtle', 95, 7)]), 'low');
+  assert.equal(confidence([r('base1-63', 'Squirtle', 63, 7), r('lc-95', 'Squirtle', 95, 6.5)]), 'medium');
 });
 
 test('confidence is high for a clean scan', () => {

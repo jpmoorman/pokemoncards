@@ -738,7 +738,7 @@ export async function readCard(canvas, onStatus, opts = {}) {
         }
       }
       // Of those, the one that reads most like a card name: text read the wrong way up can hold
-      // a short name too ("Nessa" in junk, against "Biissey" the right way up).
+      // a short name too (a weak match in junk, against a clear one the right way up).
       if (!turn && !knownName(first)) for (const t of tried.slice(1)) if (nameScore(t) > (turn ? nameScore(turn) : 0)) turn = t;
       if (turn) {
         use(turn);

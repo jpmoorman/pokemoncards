@@ -67,9 +67,9 @@ test('years, Pokédex numbers, levels, HP and weights are no numbers', () => {
 test('a 1- or 2-digit number with its slash read as 1 or lost needs the rarity mark after it', () => {
   assert.deepEqual(read('4/102 *'), ['4/102']);
   // Older cards print the mark right after the set size ("10/64★").
-  assert.deepEqual(read('GAMEFREAK. 1999 Wizards.\n10164★'), ['10/64']);
-  assert.deepEqual(read('Wre1664*'), ['16/64']);
-  assert.deepEqual(read('LV.76 #6\n4102*'), ['4/102']);
+  assert.deepEqual(read('©1999 Wizards\n10164★'), ['10/64']);
+  assert.deepEqual(read('Illus. Ken Sugimori\n1664*'), ['16/64']);
+  assert.deepEqual(read('LV. 42 #59\n4102*'), ['4/102']);
   // More than one reading fits: both are given, the name decides.
   assert.deepEqual(read('41102 *'), ['4/102', '41/102']);
   assert.deepEqual(read('1164★'), ['1/64', '11/64']);
