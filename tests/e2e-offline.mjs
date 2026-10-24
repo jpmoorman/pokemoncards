@@ -251,7 +251,10 @@ net.changed.set('js/assets.js', Buffer.from(`export const ASSETS = ${JSON.string
 net.changed.set('js/ocr-worker.js', Buffer.from(fs.readFileSync(path.join(root, 'js/ocr-worker.js'), 'utf8').replace("'models/ppocr-v6tiny-1/'", "'models/ppocr-v6tiny-9/'")));
 net.changed.set('index.html', Buffer.from(v2.replace('content="2"', 'content="4"')));
 const offlineCheck = async () => {
-  const res = await scan(CARDS.charizardEx);
+  // A scan that fails ("Could not load the text-recognition engine") says so in the status line.
+  const failed = page.waitForFunction(() => /Scan failed/.test(document.querySelector('#scan-status')?.textContent || '') && document.querySelector('#scan-status').textContent, null, { timeout: 120000 });
+  const res = await Promise.race([scan(CARDS.charizardEx), failed.then((h) => h.jsonValue()).then((status) => ({ status }))]);
+  if (res.status) return { same: false, res };
   await page.click('.sheet-close');
   const hp = await page.evaluate(async () => (await (await import(new URL('js/api.js', location.href).href)).lookupCard('base1-4'))?.hp);
   return { same: res.name === online.name && res.set === online.set && res.conf === online.conf, hp, res };
