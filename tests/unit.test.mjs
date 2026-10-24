@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parseBottomText, pickName, cleanNameLine } from '../js/parse.js';
-import { buildIndex, rankCandidates, partialSimilarity, parseLocalId, manualSearch, confidence, coreName, nameMarks } from '../js/match.js';
+import { buildIndex, rankCandidates, partialSimilarity, parseLocalId, manualSearch, confidence, coreName, nameMarks, reprintRivals } from '../js/match.js';
 import { variantPrices, headlinePrice, marketLinks, searchQuery, printedNumber, variantImage, eurToUsd, priceInUsd, variantLabel } from '../js/prices.js';
 
 const fx = (f) => JSON.parse(fs.readFileSync(new URL(`./fixtures/${f}`, import.meta.url)));
@@ -73,6 +73,18 @@ test('number + total + name picks the exact printing', () => {
   // Same number in three sets; the set code decides.
   assert.equal(top({ numbers: [{ prefix: '', num: 125, total: null }], setCodes: ['OBF'] }), 'sv03-125');
   assert.equal(top({ nameBest: 'Mega Charizard X ex', numbers: [{ prefix: '', num: 125, total: 94 }] }), 'me02-125');
+});
+
+test('a reprint-collection copy scores like its original: the original first, never "high"', () => {
+  const r = rankCandidates(index, { nameBest: 'Charizard', nameAll: '', numbers: [{ prefix: '', num: 4, total: 102 }], setCodes: [], codeCandidates: [] }, catalog.abbr);
+  assert.equal(r[0].card.id, 'base1-4');
+  assert.equal(r.find((x) => x.card.id === '30th-c-001').score, r[0].score);
+  assert.deepEqual(reprintRivals(r).map((x) => x.card.id), ['30th-c-001']);
+  assert.equal(confidence(r), 'medium');
+  // Manual search by the printed number lists both.
+  const m = manualSearch(index, 'charizard', '4/102').map((x) => x.card.id);
+  assert.equal(m[0], 'base1-4');
+  assert.ok(m.includes('30th-c-001'));
 });
 
 test('vintage card without set code: number/total + name', () => {

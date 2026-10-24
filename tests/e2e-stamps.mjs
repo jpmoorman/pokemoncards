@@ -276,6 +276,74 @@ for (const setup of ['toploader', 'turned', 'steep']) {
   await ctx.close();
 }
 
+// 7b) Details looked up only to rank a scan: not saved on the device (only the card shown
+// is), not retried when the server can't be reached, and not asked for at all when the
+// phone says it's offline. A fresh browser profile, so nothing is cached.
+{
+  const ctx = await h.browser.newContext({ viewport: { width: 390, height: 844 } });
+  await stubNetwork(ctx, h.origin);
+  const p3 = await ctx.newPage();
+  p3.on('pageerror', (e) => h.logs.push(`pageerror: ${e.message}`));
+  let unreachable = false;
+  const asked = [];
+  await p3.route(/https:\/\/api\.tcgdex\.net\/v2\/en\/cards\/.+/, (route) => {
+    asked.push(decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop()));
+    return unreachable ? route.abort('internetdisconnected') : route.fallback();
+  });
+  await p3.goto(`${h.origin}/index.html`);
+  await p3.waitForFunction(() => window.cardScanner?.catalog?.index, null, { timeout: 30000 });
+  // Name only (no number): several printings are close, so several are looked up.
+  const card = async (spec) => (await makeStampedCard(p3, spec, null)).toString('base64');
+  const run = (b64, { offline = false, show = false } = {}) =>
+    p3.evaluate(
+      async ({ b64, offline, show }) => {
+        if (offline) Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+        const { identify } = await import('/js/identify.js');
+        const { fileToCanvas } = await import('/js/ocr.js');
+        const { getCard } = await import('/js/api.js');
+        const r = await identify(await fileToCanvas(await (await fetch(`data:image/png;base64,${b64}`)).blob()), () => {});
+        if (show) await getCard(r.ranked[0].card.id); // what the result sheet does
+        delete navigator.onLine;
+        await new Promise((res) => setTimeout(res, 300)); // let any save finish
+        const saved = await new Promise((resolve) => {
+          const req = indexedDB.open('pokecard-scanner');
+          req.onsuccess = () => {
+            const q = req.result.transaction('kv').objectStore('kv').getAllKeys();
+            q.onsuccess = () => resolve(q.result.filter((k) => String(k).startsWith('card:')).map((k) => k.slice(5)));
+          };
+        });
+        return { top: r.ranked[0]?.card.id, unchecked: r.ranked.filter((x) => x.unchecked).length, saved };
+      },
+      { b64, offline, show },
+    );
+  const base = await card({ ...CARDS.baseCharizard, bottomRight: '' });
+  const online = await run(base);
+  const onlineAsked = [...asked];
+  const shown = await run(base, { show: true });
+  unreachable = true;
+  let mark = asked.length;
+  const down = await run(await card({ ...CARDS.baseCharizard, name: 'Pikachu', hp: '40 HP', evolves: '', attack: 'Thunder Jolt', bottomRight: '' }));
+  const downAsked = asked.slice(mark);
+  unreachable = false;
+  mark = asked.length;
+  const off = await run(await card({ ...CARDS.aurorus, bottomLeft: '' }), { offline: true });
+  const offAsked = asked.slice(mark);
+  t.check(
+    'details looked up to rank a scan: kept in memory only, asked once, not at all offline',
+    onlineAsked.length >= 2 &&
+      !online.saved.length &&
+      shown.saved.join() === shown.top &&
+      asked.filter((id) => id === shown.top).length === 1 &&
+      downAsked.length >= 2 &&
+      new Set(downAsked).size === downAsked.length &&
+      down.unchecked >= 2 &&
+      !offAsked.length &&
+      /^me03-/.test(off.top),
+    JSON.stringify({ onlineAsked, online, shown, downAsked, down, offAsked, off }),
+  );
+  await ctx.close();
+}
+
 // 8) Optional real photos: STAMP_PHOTOS="/abs/a.jpg=Set Logo Stamp,/abs/b.jpg=Holo".
 for (const item of (process.env.STAMP_PHOTOS || '').split(',').filter(Boolean)) {
   const [file, version] = item.split('=');

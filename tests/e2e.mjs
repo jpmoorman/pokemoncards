@@ -71,6 +71,47 @@ for (const c of cases) {
     t.check("version switch shows that version's photo and USD price", v.img.includes('685559') && v.price === '$32.04' && /converted/.test(v.src) && !v.euros, JSON.stringify(v));
     await page.screenshot({ path: path.join(results, 'aurorus-stamp-version.png') });
   }
+
+  if (c.spec === CARDS.baseCharizard) {
+    // The 30th Classic Collection reprint prints the same text and number ("4/102"): the scan
+    // can't rule it out, so it isn't a confident match and the reprint is one tap away (and back).
+    const notes = () => page.evaluate(() => [...document.querySelectorAll('.reprint-note')].map((n) => n.textContent));
+    const shown = (set) => page.waitForFunction((set) => document.querySelector('.set-name')?.textContent === set && document.querySelector('.headline-price')?.textContent.trim(), set, { timeout: 10000 });
+    const before = { conf: got.conf, notes: await notes() };
+    await page.click('.reprint-note');
+    await shown('30th Classic Collection');
+    const reprint = { price: await page.textContent('.headline-price'), notes: await notes() };
+    await page.screenshot({ path: path.join(results, 'reprint-note.png') });
+    await page.click('.reprint-note');
+    await shown('Base Set');
+    t.check(
+      'a card with a reprint twin: "Likely match" and a one-tap note to the reprint and back',
+      before.conf === 'Likely match' &&
+        before.notes.length === 1 &&
+        before.notes[0] === 'Could also be the 30th Celebration (2026) reprint — it has a 30th-anniversary logo on the artwork. Tap to switch' &&
+        reprint.price === '$11.25' &&
+        reprint.notes[0] === 'Could also be the original Base Set (1999) card — it has no anniversary logo on the artwork. Tap to switch' &&
+        (await page.textContent('.headline-price')) === '$954.65',
+      JSON.stringify({ before, reprint }),
+    );
+  }
+
+  if (c.spec === CARDS.charizardEx) {
+    // Re-match ranks with everything the scan read (both passes), not only the clues typed:
+    // with the number and set cleared, the HP, regulation mark and illustrator read still pick
+    // the Obsidian Flames printing, where the name alone would not.
+    await page.fill('#clue-number', '');
+    await pickSet(page, 'clue-set', '');
+    const nameOnly = await page.evaluate(async () => {
+      const [{ rankCandidates }, { catalog }] = await Promise.all([import('/js/match.js'), import('/js/catalog.js')]);
+      return rankCandidates(catalog.index, { nameBest: 'Charizard ex', nameAll: '', numbers: [], setCodes: [], codeCandidates: [] }, catalog.setAbbr)[0].card.id;
+    });
+    await page.evaluate(() => document.querySelector('#card-detail .detail').setAttribute('data-old', ''));
+    await page.click('#clue-form button[type="submit"]');
+    await page.waitForFunction(() => document.querySelector('#card-detail .detail:not([data-old]) .headline-price')?.textContent.trim(), null, { timeout: 10000 });
+    const re = await page.evaluate(() => ({ meta: document.querySelector('.detail-meta')?.textContent, rawText: !document.querySelector('#debug-wrap').hidden }));
+    t.check('Re-match uses the whole read: the second pass picks the printing', nameOnly !== 'sv03-125' && re.meta.startsWith('#125/197') && re.rawText, JSON.stringify({ nameOnly, ...re }));
+  }
   await page.click('.sheet-close');
 }
 

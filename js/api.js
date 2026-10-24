@@ -51,7 +51,7 @@ async function getJSON(path, { retries = 2 } = {}) {
       return await res.json();
     } catch (e) {
       lastErr = e;
-      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+      if (i < retries) await new Promise((r) => setTimeout(r, 400 * (i + 1)));
     }
   }
   throw lastErr;
@@ -102,32 +102,45 @@ function expand(catalog) {
 }
 
 const cardMem = new Map(); // id -> { t, card }, same as the IndexedDB copy
-const cardLoads = new Map(); // id -> download in progress, shared by everyone asking meanwhile
+const cardLoads = new Map(); // id -> { load, retries }: download in progress, shared by everyone asking meanwhile
+// Cards only looked up to rank a scan (lookupCard): kept in memory, the latest LOOKED_MAX of
+// them, and saved on the device only once shown (getCard).
+const looked = new Map(); // id -> { t, card }
+const LOOKED_MAX = 200;
+// Lookups that failed lately (server unreachable): not asked again for a minute, so a scan
+// asks for each card once however many times the ranking wants it.
+const missed = new Map(); // id -> when
+const MISS_MS = 60 * 1000;
 
-/** Download a card's details once, however many callers ask while it's on its way. */
-function downloadCard(id) {
-  let load = cardLoads.get(id);
-  if (!load) {
-    load = getJSON(`/cards/${encodeURIComponent(id)}`)
-      .then((card) => {
-        if (card) {
-          const copy = { t: Date.now(), card };
-          cardMem.set(id, copy);
-          kvSet(`card:${id}`, copy);
-        }
-        return card;
-      })
-      .finally(() => cardLoads.delete(id));
-    cardLoads.set(id, load);
-  }
+/**
+ * Download a card's details once, however many callers ask while it's on its way.
+ * Resolves to { t, card }, or null if there's no such card. A caller wanting more tries than
+ * the download in progress makes starts its own when that one fails.
+ */
+function downloadCard(id, retries) {
+  const shared = cardLoads.get(id);
+  if (shared) return shared.retries >= retries ? shared.load : shared.load.catch(() => downloadCard(id, retries));
+  const load = getJSON(`/cards/${encodeURIComponent(id)}`, { retries })
+    .then((card) => card && { t: Date.now(), card })
+    .finally(() => cardLoads.get(id)?.load === load && cardLoads.delete(id));
+  cardLoads.set(id, { load, retries });
   return load;
+}
+
+/** Keep a copy shown to the user, in memory and on the device. */
+function keep(id, copy) {
+  cardMem.set(id, copy);
+  looked.delete(id);
+  missed.delete(id);
+  kvSet(`card:${id}`, copy);
+  return copy.card;
 }
 
 /**
  * Full card details including prices, kept for 12 hours.
  * { fresh: true } downloads them again (Refresh prices); offline it still falls back to the saved copy.
- * Callers asking for the same card at the same time share one download (identify.js starts
- * it for the best match; the result sheet or batch queue then asks for the same card).
+ * Callers asking for the same card at the same time share one download (identify.js looks up
+ * the best few matches; the result sheet or batch queue then asks for the one shown).
  */
 export async function getCard(id, { fresh = false } = {}) {
   const key = `card:${id}`;
@@ -136,13 +149,45 @@ export async function getCard(id, { fresh = false } = {}) {
     cardMem.set(id, cached);
     return cached.card;
   }
+  // Looked up moments ago to rank the scan.
+  const seen = looked.get(id);
+  if (!fresh && seen && Date.now() - seen.t < CARD_MAX_AGE) return keep(id, seen);
   try {
-    return await downloadCard(id);
+    const copy = await downloadCard(id, 2);
+    return copy ? keep(id, copy) : null;
   } catch (e) {
     if (!cached) throw e;
     cardMem.set(id, cached);
     return cached.card; // offline: show last known prices
   }
+}
+
+/**
+ * A card's details to rank a scan with (rerank.js): HP, attacks, illustrator… don't change, so
+ * any saved copy will do. Otherwise one download, not retried, kept in memory only (getCard
+ * saves it once the card is shown). Offline it sends nothing. Resolves to the card or null.
+ */
+export async function lookupCard(id) {
+  const mem = cardMem.get(id) || looked.get(id) || (await kvGet(`card:${id}`));
+  if (mem) return mem.card;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
+  if (Date.now() - (missed.get(id) || 0) < MISS_MS) return null;
+  let copy;
+  try {
+    copy = await downloadCard(id, 0);
+  } catch {
+    remember(missed, id, Date.now());
+    return null;
+  }
+  if (copy && !cardMem.has(id)) remember(looked, id, copy);
+  return copy?.card ?? null;
+}
+
+/** Add to a map that keeps only its latest LOOKED_MAX entries. */
+function remember(map, key, value) {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > LOOKED_MAX) map.delete(map.keys().next().value);
 }
 
 /** When the copy of a card that getCard last returned was downloaded (ms since epoch), 0 if never. */

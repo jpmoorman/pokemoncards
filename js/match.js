@@ -71,27 +71,65 @@ export function parseLocalId(localId) {
   return { prefix: m[1].toUpperCase(), num: parseInt(m[2], 10) };
 }
 
+// Reprint collections copy an older card exactly, number and set size included ("4/102"), and
+// add an anniversary logo to the artwork; TCGdex numbers them on their own (CC002, 001).
+// Reprint -> the original it copies. Without this the printed number could only match the
+// original, and the scanner would name a $5 reprint as the (much dearer) vintage card.
+// (Legendary Collection, Base Set 2, Evolutions and the like print new numbers, so the number
+// tells those apart.)
+export const REPRINTS = {
+  // Celebrations: Classic Collection (2021)
+  'cel25cc-CC001': 'base1-2', 'cel25cc-CC002': 'base1-4', 'cel25cc-CC003': 'base1-15', 'cel25cc-CC004': 'base1-73',
+  'cel25cc-CC005': 'base5-8', 'cel25cc-CC006': 'base5-15', 'cel25cc-CC007': 'gym2-15', 'cel25cc-CC008': 'basep-24',
+  'cel25cc-CC009': 'neo1-20', 'cel25cc-CC010': 'neo3-66', 'cel25cc-CC011': 'ex4-9', 'cel25cc-CC012': 'ex7-86',
+  'cel25cc-CC013': 'ex12-88', 'cel25cc-CC014': 'ex15-93', 'cel25cc-CC015': 'pop5-17', 'cel25cc-CC016': 'dp4-15',
+  'cel25cc-CC017': 'pl2-109', 'cel25cc-CC018': 'pl3-145', 'cel25cc-CC019': 'hgss1-107', 'cel25cc-CC020': 'bw1-113',
+  'cel25cc-CC021': 'bw1-114', 'cel25cc-CC022': 'bw4-54', 'cel25cc-CC023': 'xy1-97', 'cel25cc-CC024': 'xy6-76',
+  'cel25cc-CC025': 'sm2-60',
+  // 30th Celebration: Classic Collection (2026), matched to the original by name, HP, attacks and illustrator
+  '30th-c-001': 'base1-4', '30th-c-002': 'ex1-5', '30th-c-003': 'ex11-11', '30th-c-004': 'bw10-11', '30th-c-005': 'gym1-18',
+  '30th-c-006': 'ex7-19', '30th-c-007': 'neo1-25', '30th-c-008': 'sm9-33', '30th-c-009': 'xy9-41', '30th-c-010': 'dp6-43',
+  '30th-c-011': 'pl1-47', '30th-c-012': 'swsh4-50', '30th-c-013': 'sm4-57', '30th-c-014': 'base1-58', '30th-c-015': 'gym2-69',
+  '30th-c-016': 'bw6-85', '30th-c-017': 'sm1-89', '30th-c-018': 'hgss4-94', '30th-c-019': 'hgss4-100', '30th-c-020': 'hgss4-99',
+  '30th-c-021': 'bw3-92', '30th-c-022': 'dp4-106', '30th-c-023': 'xy5-106', '30th-c-024': 'neo4-106', '30th-c-025': 'ex10-108',
+  '30th-c-026': 'swsh8-114', '30th-c-027': 'swsh9-123', '30th-c-028': 'swsh1-138', '30th-c-029': 'ecard2-149', '30th-c-030': 'sv02-203',
+};
+/** The reprint collections, for the result sheet's note: the year they came out and their artwork logo. */
+export const REPRINT_SETS = {
+  cel25cc: { name: 'Celebrations', year: 2021, logo: '25th-anniversary' },
+  '30th-c': { name: '30th Celebration', year: 2026, logo: '30th-anniversary' },
+};
+
+// How far ahead of every other match the best must be for a "high" confidence.
+const CONFIDENT_GAP = 1.5;
+
 /**
  * Build the in-memory search index.
  * cards: [{ id, localId, name, image? }], sets: [{ id, name, cardCount: {official,total}, ... }]
+ * A reprint-collection card also gets reprintOf (the original's id) and printed: what it
+ * copies, { prefix, num, total, setId } (number, set size and the original's set); it is found
+ * under both numbers.
  */
 export function buildIndex(cards, sets) {
   const setsById = new Map();
   // Pokémon TCG Pocket (the mobile game) sets use ids like "A1", "B2a", "P-A"; skip them.
   sets.forEach((s, i) => !/^[A-Z]/.test(s.id) && setsById.set(s.id, { ...s, order: i }));
   const entries = [];
+  const byId = new Map();
   const byNum = new Map();
   const byName = new Map();
+  const addNum = (num, e) => {
+    if (!byNum.has(num)) byNum.set(num, []);
+    byNum.get(num).push(e);
+  };
   for (const c of cards) {
     const setId = c.id.slice(0, c.id.length - String(c.localId).length - 1);
     if (!setsById.has(setId)) continue;
     const parsed = parseLocalId(c.localId);
     const e = { ...c, setId, prefix: parsed?.prefix ?? '', num: parsed?.num ?? null };
     entries.push(e);
-    if (e.num != null) {
-      if (!byNum.has(e.num)) byNum.set(e.num, []);
-      byNum.get(e.num).push(e);
-    }
+    byId.set(e.id, e);
+    if (e.num != null) addNum(e.num, e);
     const key = compact(c.name);
     if (!byName.has(key)) {
       const core = coreName(c.name);
@@ -99,7 +137,29 @@ export function buildIndex(cards, sets) {
     }
     byName.get(key).cards.push(e);
   }
+  for (const [id, of] of Object.entries(REPRINTS)) {
+    const e = byId.get(id);
+    const o = byId.get(of);
+    if (!e || !o || o.num == null) continue;
+    e.reprintOf = of;
+    e.printed = { prefix: o.prefix, num: o.num, total: setsById.get(o.setId).cardCount?.official || null, setId: o.setId };
+    if (o.num !== e.num) addNum(o.num, e);
+  }
   return { entries, byNum, byName, setsById };
+}
+
+/**
+ * The reprint-collection copies (or the original) of the top match that the evidence can't
+ * rule out: they print the same text and number, only an anniversary logo on the artwork
+ * differs. Returns those ranked entries (often none). Ruled out means scored clearly lower
+ * (the gap a "high" confidence needs), e.g. once "Wizards" was read in the copyright line,
+ * which no reprint prints.
+ */
+export function reprintRivals(ranked) {
+  const [a] = ranked;
+  if (!a) return [];
+  const twin = (r) => (a.card.reprintOf && (r.card.id === a.card.reprintOf || r.card.reprintOf === a.card.reprintOf)) || r.card.reprintOf === a.card.id;
+  return ranked.filter((r) => r !== a && twin(r) && r.score > a.score - CONFIDENT_GAP);
 }
 
 // Marks printed as a logo or symbol next to the name ("Charizard ex", "Umbreon V",
@@ -183,7 +243,8 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
     return m;
   };
   const nameScore = (card) => nameMatch(card).s;
-  const setBonus = (card, total, reasons) => {
+  // printed: the number a reprint-collection card prints (its original's), whose set size counts.
+  const setBonus = (card, total, reasons, printed = null) => {
     const set = index.setsById.get(card.setId);
     let s = 0;
     const abbr = abbrOf(card.setId);
@@ -198,10 +259,10 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
       reasons.push(`set code ${abbr}?`);
     }
     if (total) {
-      if (set.cardCount?.official === total) {
+      if ((printed ? printed.total : set.cardCount?.official) === total) {
         s += 2.5;
         reasons.push(`set size ${total}`);
-      } else if (set.cardCount?.total === total) {
+      } else if (!printed && set.cardCount?.total === total) {
         s += 1.5;
         reasons.push(`set size ${total}`);
       } else {
@@ -221,14 +282,21 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
 
   for (const n of clues.numbers || []) {
     for (const card of index.byNum.get(n.num) || []) {
-      const reasons = [`#${card.localId}`];
+      // A reprint-collection card prints its original's number; its own (TCGdex) number
+      // counts only typed in full ("CC002") or within a set the user picked.
+      let p = card;
+      if (card.printed) {
+        if (card.printed.num === n.num && n.prefix === card.printed.prefix) p = card.printed;
+        else if (!(n.prefix && n.prefix === card.prefix) && !setIds.has(card.setId)) continue;
+      }
+      const reasons = [`#${p === card ? card.localId : `${p.prefix}${p.num}`}`];
       let s = 3;
-      if (n.prefix || card.prefix) {
-        if (n.prefix === card.prefix) s += 1;
-        else if (n.prefix && card.prefix) continue;
+      if (n.prefix || p.prefix) {
+        if (n.prefix === p.prefix) s += 1;
+        else if (n.prefix && p.prefix) continue;
         else s -= 1.5;
       }
-      s += setBonus(card, n.total, reasons);
+      s += setBonus(card, n.total, reasons, p === card ? null : p);
       const ns = nameScore(card);
       if (ns > 0.5) reasons.push(`name ${Math.round(ns * 100)}%`);
       s += 5 * ns;
@@ -257,7 +325,7 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
         const reasons = [`name ${Math.round(ns * 100)}%`];
         let s = 5 * ns;
         const total = (clues.numbers || []).find((n) => n.total)?.total;
-        s += Math.max(0, setBonus(card, total, reasons));
+        s += Math.max(0, setBonus(card, total, reasons, card.printed));
         // Of two similar names the longer one explains more of the read: "Charizard ex" over
         // "Charizard" for "Charizard ex", "Dark Charizard" over "Charizard" for "ark Charizard".
         s += RANK.length * Math.min(len, 20);
@@ -281,16 +349,32 @@ export function rankCandidates(index, clues, setAbbr = {}, limit = 40) {
       .map((card) => ({ card, set: index.setsById.get(card.setId), score: 1, reasons: ['chosen set'] }));
   }
   return out
-    .sort((a, b) => b.score - a.score || b.set.order - a.set.order)
+    .sort(byScore)
     .slice(0, limit);
 }
 
-/** Rough confidence label for the top result. */
+// Best first; on a tie the newest set, but a reprint-collection copy after anything else.
+const reprint = (r) => (r.card.reprintOf ? 1 : 0);
+const byScore = (a, b) => b.score - a.score || reprint(a) - reprint(b) || b.set.order - a.set.order;
+
+/** Is the top match as clear on the scores without card details (rerank.js `hinted`)? */
+function clearWithout(ranked) {
+  const [a, ...rest] = ranked;
+  const without = (r) => r.hinted ?? r.score;
+  return without(a) >= 8 && rest.every((r) => without(a) - without(r) >= CONFIDENT_GAP);
+}
+
+/**
+ * Rough confidence label for the top result: 'high' | 'medium' | 'low' | 'none'.
+ * Never 'high' when the top match has a reprint-collection twin the evidence can't rule out
+ * (see reprintRivals), nor when card details came for only some of the close matches (rerank.js
+ * marks the others `unchecked`) unless the scan is just as clear without any details.
+ */
 export function confidence(ranked) {
   if (!ranked.length) return 'none';
   const [a, b] = ranked;
   const gap = b ? a.score - b.score : a.score;
-  if (a.score >= 8 && gap >= 1.5) return 'high';
+  if (a.score >= 8 && gap >= CONFIDENT_GAP && !reprintRivals(ranked).length && (!ranked.some((r) => r.unchecked) || clearWithout(ranked))) return 'high';
   if (a.score >= 6) return 'medium';
   return 'low';
 }
@@ -313,14 +397,14 @@ export function manualSearch(index, nameQuery, numberQuery, setAbbr = {}, setId 
         if (!key.includes(nq)) continue;
         for (const card of group.cards) {
           if (have.has(card.id)) continue;
-          if (clues.numbers.length && !clues.numbers.some((n) => n.num === card.num)) continue;
+          if (clues.numbers.length && !clues.numbers.some((n) => n.num === card.num || n.num === card.printed?.num)) continue;
           if (setId && card.setId !== setId) continue;
           ranked.push({ card, set: index.setsById.get(card.setId), score: 2 + nq.length / key.length, reasons: ['name contains'] });
         }
       }
     }
-    if (clues.numbers.length) ranked = ranked.filter((r) => clues.numbers.some((n) => n.num === r.card.num));
-    ranked.sort((a, b) => b.score - a.score || b.set.order - a.set.order);
+    if (clues.numbers.length) ranked = ranked.filter((r) => clues.numbers.some((n) => n.num === r.card.num || n.num === r.card.printed?.num));
+    ranked.sort(byScore);
   }
   return ranked.slice(0, 120);
 }

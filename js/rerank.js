@@ -10,7 +10,7 @@
 // The functions are pure: the app feeds it details from api.getCard (see identify.js), the
 // offline scorer (tests/rank-eval.mjs) from a catalog snapshot, so both run the same code.
 import { normalize } from './parse.js';
-import { dice, editDistance, nameMarks } from './match.js';
+import { dice, editDistance, nameMarks, REPRINT_SETS } from './match.js';
 
 /** Weights, in the same units as match.js scores (a name read right is worth 5). */
 export const W = {
@@ -21,6 +21,7 @@ export const W = {
   yearEarly: 0.6, // copyright year well before the card came out (reprints keep the old one)
   yearOk: 0.3,
   eraWord: 1.5, // "Wizards", "Pokémon Power", "Poké-Body", "Ability" printed outside its era
+  reprintWizards: 2, // "Wizards" read: not a reprint collection's copy (they print no Wizards copyright)
   fetchGap: 2.5, // only look up candidates within this much of the best
   rule: 1.5, // rule box read ("Pokémon ex rule", "TAG TEAM rule"…): the name has that mark
   prizes: 0.7, // "your opponent takes 2 Prize cards": some marked (rule box) Pokémon
@@ -73,7 +74,10 @@ export function setYears(index) {
 
 const SV_FIRST = 'sv01';
 // Reprints of vintage cards, printed with the old yellow border.
-const CLASSIC = new Set(['cel25cc', '30th-c']);
+const CLASSIC = new Set(Object.keys(REPRINT_SETS));
+
+/** The set a card looks like it's from: a reprint-collection card's original (match.REPRINTS). */
+const printedSet = (card) => card.printed?.setId || card.setId;
 
 /** Is the set from Scarlet & Violet on (silver borders)? */
 function isModern(setId, index) {
@@ -208,6 +212,8 @@ export function readFeatures(read) {
   }
   const words = normalize(all);
   const eras = ERA_WORDS.filter(([re]) => re.test(words)).map(([, a, b]) => [a, b]);
+  // "©1999 Wizards." (also read "Wiards", "Wizaros"…): a card printed by Wizards of the Coast.
+  const wizards = words.split(' ').some((w) => w[0] === 'w' && w.length >= 6 && w.length <= 8 && editDistance(w, 'wizards', 1) <= 1);
   // Regulation mark: one capital letter right before the set code ("G MEW EN").
   const reg = /(?:^|\s)([D-K])\s+[A-Z0-9]{3}\s*EN\b/.exec(debug.bottom || '');
   const marks = new Set(RULES.filter(([re]) => re.test(words)).flatMap(([, m]) => m));
@@ -222,6 +228,7 @@ export function readFeatures(read) {
     hpPart,
     year: copyrightYear(`${debug.bottom || ''}\n${full}`),
     eras,
+    wizards,
     regMark: reg ? reg[1] : null,
     border: borderClass(read?.border),
   };
@@ -284,7 +291,7 @@ export function cardDetails(card) {
   };
 }
 
-const FULL_ART = /ultra|secret|illustration|hyper|shiny|full art|gallery|amazing|radiant|classic/i;
+const FULL_ART = /ultra|secret|illustration|hyper|shiny|full art|gallery|amazing|radiant/i;
 
 /**
  * Score from a card's details against what was read: { score, reasons }.
@@ -342,7 +349,8 @@ export function detailScore(f, d, modern = false) {
 export function hintScore(f, card, index) {
   let score = 0;
   const reasons = [];
-  const { setId } = card;
+  // A reprint-collection card copies its original, copyright and border included.
+  const setId = printedSet(card);
   if (f.marks.size || f.prizes) {
     const marks = nameMarks(card.name);
     if (f.marks.size) {
@@ -371,6 +379,8 @@ export function hintScore(f, card, index) {
   if (span) {
     for (const [a, b] of f.eras) if (span[1] < a - 1 || span[0] > b + 1) score -= W.eraWord;
   }
+  // The reprint collections copy Wizards-era cards without the "©… Wizards" line.
+  if (f.wizards && CLASSIC.has(card.setId)) score -= W.reprintWizards;
   return { score, reasons };
 }
 
@@ -409,9 +419,10 @@ const FETCH = 10;
  * ctx: { index, getCard?: (id) => card | Promise<card> (TCGdex card or snapshot details),
  *        fetch?: how many candidates to look up at most (default 10),
  *        timeoutMs?: how long to wait for the details (default: no limit) }
- * Returns a new list, best first, each with { base: first-pass score }. Works without any
+ * Returns a new list, best first, each with { base: first-pass score, hinted: score without
+ * details, unchecked: true if its details were wanted but didn't come }. Works without any
  * details (offline): then only the border, copyright and wording hints count; a card whose
- * details didn't come in time is scored without them.
+ * details didn't come in time is scored without them (and keeps its place, see below).
  */
 export async function rerank(ranked, read, ctx = {}) {
   if (!ranked?.length) return ranked || [];
@@ -432,15 +443,24 @@ export async function rerank(ranked, read, ctx = {}) {
     await Promise.race([Promise.all(each), late]);
     clearTimeout(timer);
   }
-  if (got.size) {
-    out = sortRanked(
-      out.map((r) => {
-        if (!got.has(r.card.id)) return r;
-        const s = detailScore(f, got.get(r.card.id), index ? isModern(r.card.setId, index) : false);
-        return { ...r, score: r.score + s.score, reasons: [...r.reasons, ...s.reasons] };
-      }),
-    );
-  }
+  if (!ids.length) return out;
+  // Every candidate keeps its score without details (hinted); one whose details were wanted
+  // but didn't come is marked unchecked (match.confidence then says "high" only if the scan is
+  // just as clear without any details).
+  out = out.map((r) => {
+    if (!got.has(r.card.id)) return { ...r, hinted: r.score, ...(ids.includes(r.card.id) && { unchecked: true }) };
+    const s = detailScore(f, got.get(r.card.id), index ? isModern(printedSet(r.card), index) : false);
+    return { ...r, hinted: r.score, score: r.score + s.score, reasons: [...r.reasons, ...s.reasons] };
+  });
+  if (got.size === ids.length) return sortRanked(out);
+  // Details came for only some: only those candidates are re-ordered among themselves, into
+  // the places they held without details; the others keep theirs. A sibling printing can't
+  // jump ahead just because its details came first, so this is never worse than no details
+  // at all. (Scores then don't always go down the list; the order is what counts.)
+  const places = [];
+  out.forEach((r, i) => got.has(r.card.id) && places.push(i));
+  const checked = sortRanked(places.map((i) => out[i]));
+  places.forEach((i, k) => (out[i] = checked[k]));
   return out;
 }
 

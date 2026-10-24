@@ -215,6 +215,13 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
   background: color-mix(in srgb, var(--good) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--good) 45%, var(--border));
 }
 
+/* The scan can't tell the card from its reprint-collection twin: a one-tap switch. */
+.reprint-note {
+  display: block; width: 100%; margin-top: 12px; padding: 10px 12px; border-radius: 10px; text-align: left;
+  font: inherit; font-size: .85rem; color: var(--text); cursor: pointer;
+  background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+
 .price-tables { display: grid; gap: 10px; margin-top: 12px; }
 .ptable { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
 .ptable h4 { margin: 0 0 6px; font-size: .85rem; display: flex; justify-content: space-between; }

@@ -1,0 +1,51 @@
+{
+  "category": "Pokemon",
+  "id": "30th-c-001",
+  "illustrator": "Mitsuhiro Arita",
+  "image": "https://assets.tcgdex.net/en/me/30th-c/001",
+  "localId": "001",
+  "name": "Charizard",
+  "rarity": "None",
+  "set": {
+    "cardCount": {
+      "official": 0,
+      "total": 30
+    },
+    "id": "30th-c",
+    "name": "30th Classic Collection"
+  },
+  "variants": {
+    "firstEdition": false,
+    "holo": false,
+    "normal": true,
+    "reverse": false,
+    "wPromo": false
+  },
+  "variants_detailed": [
+    {
+      "type": "normal",
+      "size": "standard",
+      "variantId": "generated",
+      "pricing": {
+        "cardmarket": null,
+        "tcgplayer": {
+          "unit": "USD",
+          "updated": "2026-10-14T22:54:33.803Z",
+          "normal": {
+            "productId": 900001,
+            "lowPrice": 9.5,
+            "midPrice": 12,
+            "highPrice": 20,
+            "marketPrice": 11.25,
+            "directLowPrice": null
+          }
+        }
+      }
+    }
+  ],
+  "hp": 120,
+  "types": [
+    "Fire"
+  ],
+  "stage": "Stage2"
+}

@@ -3,7 +3,7 @@ import { getWorker, readCard, readStamps } from './ocr.js';
 import { rankCandidates, findNamesInText } from './match.js';
 import { rerank, lookupIds, borderColor } from './rerank.js';
 import { catalog, catalogReady, abbrReady } from './catalog.js';
-import { getCard } from './api.js';
+import { lookupCard } from './api.js';
 
 // The second pass looks up the details (HP, attacks, illustrator…) of the best few
 // candidates. The downloads start before the artwork is read; what hasn't come this long
@@ -43,12 +43,14 @@ export async function identify(canvas, onStatus, { stamps = true } = {}) {
   if (clues.setCodes.length || clues.codeCandidates.length) await abbrReady();
   const first = rankCandidates(catalog.index, clues, catalog.setAbbr, 150);
   const border = borderColor(card);
-  const ctx = { index: catalog.index, getCard };
-  // Start downloading the details the second pass will want (the result sheet and the batch
-  // queue then ask for the best match's prices: api.js shares the download), while the
-  // stamps are read.
+  // Kept with what was read, so the result sheet's Re-match can run the second pass again.
+  debug.border = border;
+  const ctx = { index: catalog.index, getCard: lookupCard };
+  // Start looking up the details the second pass will want (saved copies, else one download
+  // each, none offline; the result sheet and the batch queue then ask for the best match's
+  // prices: api.js shares the download), while the stamps are read.
   const asked = performance.now();
-  for (const id of lookupIds(first, { clues, debug, border }, ctx)) getCard(id).catch(() => {});
+  for (const id of lookupIds(first, { clues, debug, border }, ctx)) lookupCard(id).catch(() => {});
   // Stamps (set logo, 1st Edition, Play! Pokémon…) tell versions apart. Read whatever the
   // best match is: the user may pick another match (or re-match) that has stamped versions.
   if (card && stamps) {

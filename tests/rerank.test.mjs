@@ -1,7 +1,7 @@
 // Second ranking pass (js/rerank.js): text fingerprint of card details, border and era hints.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildIndex, rankCandidates } from '../js/match.js';
+import { buildIndex, rankCandidates, confidence, reprintRivals } from '../js/match.js';
 import {
   rerank,
   lookupIds,
@@ -208,13 +208,81 @@ test('details that fail or come too late are skipped', async () => {
   const hanging = await rerank(first(exRead('miki kudo').clues), exRead('miki kudo'), { index, getCard: () => new Promise(() => {}), timeoutMs: 50 });
   assert.ok(Date.now() - t0 < 1000);
   assert.equal(hanging[0].card.name, 'Charizard ex');
-  // Only what came in time counts.
-  const some = await rerank(first(exRead('miki kudo').clues), exRead('miki kudo'), {
+  // Only what came in time counts, and a card whose details came can't jump ahead of one
+  // whose details didn't: the order stays as without details.
+  const read = exRead('miki kudo');
+  const offline = await rerank(first(read.clues), read, { index });
+  const some = await rerank(first(read.clues), read, {
     index,
     getCard: (id) => (id === 'sv03.5-199' ? apiCard(id) : new Promise(() => {})),
     timeoutMs: 50,
   });
-  assert.equal(some[0].card.id, 'sv03.5-199');
+  assert.deepEqual(ids(some), ids(offline));
+  assert.ok(some.find((r) => r.card.id === 'sv03.5-199').reasons.includes('illus. miki kudo'));
+  assert.ok(some.find((r) => r.card.id === 'sv03.5-006').unchecked);
+});
+
+test('details that come only partly: never worse than none, and never "high"', async () => {
+  // Base Charizard read without its number: base1-4 is right without details. Only the
+  // Base Set 2 copy's details come (same text); before, that alone put it on top.
+  const offline = await rerank(first(baseRead.clues), baseRead, { index });
+  const some = await rerank(first(baseRead.clues), baseRead, { index, getCard: (id) => (id === 'base4-4' ? details[id] : Promise.reject(new Error('offline'))) });
+  assert.equal(offline[0].card.id, 'base1-4');
+  assert.equal(some[0].card.id, 'base1-4');
+  assert.ok(some[0].unchecked && some[0].hinted === offline[0].score);
+  assert.notEqual(confidence(some), 'high');
+  // The ones whose details came are still put in order among themselves.
+  const read = exRead('miki kudo');
+  const two = await rerank(first(read.clues), read, { index, getCard: (id) => (id.startsWith('sv03.5') ? apiCard(id) : Promise.reject(new Error('offline'))) });
+  const order = ids(two);
+  assert.ok(order.indexOf('sv03.5-199') < order.indexOf('sv03.5-006'));
+  // Everything came: the details decide.
+  const all = await rerank(first(read.clues), read, { index, getCard: (id) => apiCard(id) });
+  assert.equal(all[0].card.id, 'sv03.5-199');
+});
+
+test('confidence with partly-arrived details: "high" only if just as clear without them', () => {
+  const card = (id) => ({ card: index.entries.find((e) => e.id === id), set: {} });
+  const clear = [{ ...card('sv03-125'), score: 13, hinted: 11 }, { ...card('sv03.5-006'), score: 9, hinted: 9, unchecked: true }];
+  assert.equal(confidence(clear), 'high');
+  const unclear = [{ ...card('sv03-125'), score: 13, hinted: 10 }, { ...card('sv03.5-006'), score: 9, hinted: 9.5, unchecked: true }];
+  assert.equal(confidence(unclear), 'medium');
+  // All details came: the scores alone count.
+  assert.equal(confidence(unclear.map(({ unchecked, ...r }) => r)), 'high');
+});
+
+test('reprint collections print the original number: found by it, ranked after the original, never a silent pick', async () => {
+  const cc = index.entries.find((e) => e.id === 'cel25cc-CC002');
+  assert.equal(cc.reprintOf, 'base1-4');
+  assert.deepEqual(cc.printed, { prefix: '', num: 4, total: 102, setId: 'base1' });
+  // "4/102" read: both reprints score like the original; the original comes first.
+  const read = { ...baseRead, clues: clues({ nameBest: 'Charizard', numbers: [{ prefix: '', num: 4, total: 102 }] }) };
+  read.debug = { ...read.debug, bottom: 'Illus. Mitsuhiro Arita ©1995, 96, 98 Nintendo, Creatures, GAMEFREAK. 4/102' };
+  const firstPass = first(read.clues);
+  const score = (list, id) => list.find((r) => r.card.id === id).score;
+  assert.equal(score(firstPass, 'cel25cc-CC002'), score(firstPass, 'base1-4'));
+  assert.equal(firstPass[0].card.id, 'base1-4');
+  const ranked = await rerank(firstPass, read, { index, getCard: (id) => details[id] });
+  assert.equal(ranked[0].card.id, 'base1-4');
+  assert.deepEqual(reprintRivals(ranked).map((r) => r.card.id).sort(), ['30th-c-001', 'cel25cc-CC002']);
+  assert.equal(confidence(ranked), 'medium');
+  // Shown the reprint, the original is its rival.
+  const flipped = [ranked.find((r) => r.card.id === 'cel25cc-CC002'), ...ranked.filter((r) => r.card.id !== 'cel25cc-CC002')];
+  assert.deepEqual(reprintRivals(flipped).map((r) => r.card.id).sort(), ['30th-c-001', 'base1-4']);
+  // Only the reprint's own number typed in full finds it by number; a lone "1" doesn't.
+  assert.equal(first(clues({ numbers: [{ prefix: 'CC', num: 2, total: null }] }))[0].card.id, 'cel25cc-CC002');
+  assert.ok(!first(clues({ numbers: [{ prefix: '', num: 1, total: null }] })).some((r) => r.card.id === '30th-c-001'));
+});
+
+test('"Wizards" in the copyright line rules the reprints out', async () => {
+  const read = { ...baseRead, clues: clues({ nameBest: 'Charizard', numbers: [{ prefix: '', num: 4, total: 102 }] }) };
+  assert.ok(readFeatures(read).wizards);
+  assert.ok(readFeatures({ clues: clues(), debug: { bottom: 'GAMEFREAK O19 Wiards. 4/102' } }).wizards);
+  assert.ok(!readFeatures({ clues: clues(), debug: { bottom: 'GAMEFREAK. 4/102 wards' } }).wizards);
+  const ranked = await rerank(first(read.clues), read, { index, getCard: (id) => details[id] });
+  assert.equal(ranked[0].card.id, 'base1-4');
+  assert.deepEqual(reprintRivals(ranked), []);
+  assert.equal(confidence(ranked), 'high');
 });
 
 test('only the best few are looked up', () => {

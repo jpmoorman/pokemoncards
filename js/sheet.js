@@ -1,7 +1,8 @@
 // The slide-up result sheet: what the camera read, the matched card, its versions and prices.
 import { $, $$, el, emit, toast } from './ui.js';
-import { getCard, setSymbol } from './api.js';
-import { rankCandidates, confidence } from './match.js';
+import { getCard, lookupCard, setSymbol } from './api.js';
+import { rankCandidates, confidence, reprintRivals, REPRINT_SETS } from './match.js';
+import { rerank, borderColor, setYears } from './rerank.js';
 import { variantPrices, headlinePrice, formatMoney, marketLinks, printedNumber, variantImage, eurToUsd } from './prices.js';
 import { catalog, catalogReady, abbrReady } from './catalog.js';
 import { setPickerValue } from './setpicker.js';
@@ -17,7 +18,9 @@ const sheet = {
   opts: {}, // see showResults
   clues: null,
   debug: null,
+  twins: [], // the best match and its reprint-collection twins the scan can't tell apart (match.reprintRivals)
 };
+const RERANK_WAIT = 600; // Re-match: how long to wait for card details (most were looked up by the scan)
 
 // The artwork of a live scan's card is read for stamps only once a card shown comes in
 // stamped versions (a second on a phone): one read per scanned card, kept for the
@@ -43,11 +46,39 @@ export function initSheet() {
   document.addEventListener('keydown', (e) => e.key === 'Escape' && !$('#sheet').hidden && closeSheet());
   $('#clue-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const clues = cluesFromForm();
-    await catalogReady();
-    await abbrReady();
-    showResults(rankCandidates(catalog.index, clues, catalog.setAbbr), clues, null, sheet.opts);
+    const button = $('#clue-form [type=submit]');
+    button.disabled = true;
+    try {
+      const clues = cluesFromForm();
+      await catalogReady();
+      await abbrReady();
+      const { debug, opts } = sheet;
+      showResults(await rematch(clues, debug, opts, sheet.clues), clues, debug, opts);
+    } finally {
+      button.disabled = false;
+    }
   });
+}
+
+/**
+ * Rank again with corrected clues, the same two passes as a scan: the second pass also uses
+ * the rest of what was read (debug: OCR text and the border colour). A number the user typed
+ * (not the one read, `before`) is what the card prints: only cards printing it are kept, if any.
+ */
+async function rematch(clues, debug, opts, before) {
+  let first = rankCandidates(catalog.index, clues, catalog.setAbbr, 150);
+  const typed = clues.numbers.filter((n) => !before?.numbers?.some((b) => b.num === n.num && b.prefix === n.prefix && (b.total ?? null) === n.total));
+  const prints = (r) => typed.some((n) => n.num === r.card.num || n.num === r.card.printed?.num);
+  if (typed.length && first.some(prints)) first = first.filter(prints);
+  if (!debug) return first.slice(0, 40);
+  const border = debug.border ?? (opts.canvas ? borderColor(opts.canvas) : null);
+  try {
+    const ranked = await rerank(first, { clues, debug, border }, { index: catalog.index, getCard: lookupCard, timeoutMs: RERANK_WAIT });
+    return ranked.slice(0, 40);
+  } catch (e) {
+    console.warn('second pass failed', e);
+    return first.slice(0, 40);
+  }
 }
 
 /** Parse "125/197", "TG05/TG30", "SWSH050", "024" into a number clue. */
@@ -79,13 +110,15 @@ export function fillSetSelect(hiddenOrId, selectedId = '') {
   if (id) setPickerValue(id, selectedId);
 }
 
-function selectedSetFromClues(clues) {
+/** The set whose code was read; when sets share it ("30C"), the best match's, else the first released. */
+function selectedSetFromClues(clues, best) {
   if (clues.setIds?.length) return clues.setIds[0];
-  const codes = (clues.setCodes || []).map((c) => c.toUpperCase().replace(/O/g, '0'));
-  for (const [id, code] of Object.entries(catalog.setAbbr)) {
-    if (codes.includes(code.toUpperCase().replace(/O/g, '0'))) return id;
-  }
-  return '';
+  const key = (c) => String(c || '').toUpperCase().replace(/O/g, '0');
+  const codes = (clues.setCodes || []).map(key);
+  const read = (id) => codes.includes(key(catalog.setAbbr[id]));
+  if (best && read(best.card.setId)) return best.card.setId;
+  const order = (id) => catalog.index?.setsById.get(id)?.order ?? 1e9;
+  return Object.keys(catalog.setAbbr).filter(read).sort((a, b) => order(a) - order(b))[0] || '';
 }
 
 function openSheet() {
@@ -116,6 +149,7 @@ export function showResults(ranked, clues, debug, opts = {}) {
   sheet.opts = opts;
   sheet.clues = clues;
   sheet.debug = debug;
+  sheet.twins = [];
   openSheet();
   $('#sheet .sheet-panel').scrollTop = 0;
   $('#detected').hidden = !clues;
@@ -123,7 +157,7 @@ export function showResults(ranked, clues, debug, opts = {}) {
     $('#clue-name').value = clues.nameBest || clues.nameAll || '';
     const n = clues.numbers?.[0];
     $('#clue-number').value = n ? n.text || `${n.prefix}${n.num}${n.total ? `/${n.prefix}${n.total}` : ''}` : '';
-    fillSetSelect('clue-set', selectedSetFromClues(clues));
+    fillSetSelect('clue-set', selectedSetFromClues(clues, ranked[0]));
     const conf = confidence(ranked);
     const confEl = $('#confidence');
     confEl.className = `conf ${conf}`;
@@ -147,6 +181,7 @@ export function showResults(ranked, clues, debug, opts = {}) {
     $('#alternates-wrap').hidden = true;
     return;
   }
+  sheet.twins = [ranked[0], ...reprintRivals(ranked)];
   showCard(ranked[0].card.id, { ...opts, clues });
   const alts = ranked.slice(1, 13);
   $('#alternates-wrap').hidden = !alts.length;
@@ -168,6 +203,7 @@ export function openCard(id, opts = {}) {
   sheet.opts = opts;
   sheet.clues = null;
   sheet.debug = null;
+  sheet.twins = [];
   openSheet();
   $('#sheet .sheet-panel').scrollTop = 0; // the panel keeps the last sheet's scroll position
   $('#detected').hidden = true;
@@ -218,6 +254,18 @@ async function showCard(id, opts = {}) {
   renderDetail();
 }
 
+/** One line offering the twin the scan can't rule out, as a button that shows it. */
+function twinNote(twin) {
+  const { setId } = twin.card;
+  const reprint = REPRINT_SETS[setId];
+  const year = catalog.index && setYears(catalog.index).get(setId)?.[0];
+  const text = reprint
+    ? `Could also be the ${reprint.name} (${reprint.year}) reprint — it has a ${reprint.logo} logo on the artwork. Tap to switch`
+    : `Could also be the original ${twin.set?.name || 'printing'}${year ? ` (${year})` : ''} card — it has no anniversary logo on the artwork. Tap to switch`;
+  const show = () => showCard(twin.card.id, { ...sheet.opts, clues: sheet.clues, scroll: true });
+  return el('button', { class: 'reprint-note', type: 'button', onclick: show }, text);
+}
+
 function renderDetail() {
   const { card, rows, rowIdx } = sheet.current;
   const row = rows[rowIdx];
@@ -252,6 +300,9 @@ function renderDetail() {
   ]
     .filter(Boolean)
     .join(' · ');
+  // The scan can't tell this card from its reprint-collection twin (or the original): offer it.
+  const twins = sheet.twins.some((t) => t.card.id === card.id) ? sheet.twins.filter((t) => t.card.id !== card.id) : [];
+  $('.detail-top', node).after(...twins.map(twinNote));
 
   const hp = headlinePrice(row, rate);
   const anyPrice = rows.some((r) => headlinePrice(r, rate));

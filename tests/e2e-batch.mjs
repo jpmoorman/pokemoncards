@@ -164,6 +164,21 @@ await page.waitForSelector('#sheet', { state: 'hidden' });
 got = await items();
 t.check('picking a version updates the item', got[2].sub.includes('Set Logo Stamp') && got[2].price === '$32.04', JSON.stringify(got[2]));
 
+// ---- review: a card the scan can't tell from its reprint is flagged; keeping it clears the flag ----
+const twin = got[1];
+await page.click('#batch-list .bitem:nth-child(2) .b-main');
+await page.waitForSelector('#sheet:not([hidden]) .reprint-note');
+const twinNote = await page.textContent('.reprint-note');
+const twinConf = await page.textContent('#confidence');
+await page.click('.actions .btn:has-text("Use this card")');
+await page.waitForSelector('#sheet', { state: 'hidden' });
+got = await items();
+t.check(
+  'a card with a reprint twin is flagged "Check", its review offers the reprint, keeping it clears the flag',
+  twin.flag && twin.tags.includes('Check') && /30th Celebration \(2026\) reprint/.test(twinNote) && twinConf === 'Likely match' && !got[1].flag && got[1].name === 'Charizard' && got[1].price === '$954.65',
+  JSON.stringify({ twin, twinNote, twinConf, now: got[1] }),
+);
+
 // Re-opening shows the chosen card and version first, also after a reload.
 await page.reload();
 await page.click('.tab[data-view="batch"]');
