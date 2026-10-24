@@ -1,6 +1,6 @@
 // End-to-end check of stamp detection: a stamp on the artwork (set logo, 1st Edition,
 // Play! Pokémon) must pre-select that version in the result sheet, and a card without
-// one must keep the plain version. Runs the real app + real Tesseract OCR.
+// one must keep the plain version. Runs the real app + real PP-OCR (models from models/).
 //   CHROMIUM_PATH=/opt/pw-browsers/chromium node tests/e2e-stamps.mjs
 // Real photos (kept out of the repo) can be checked too, with the version they should get:
 //   STAMP_PHOTOS="/path/aurorus.jpg=Set Logo Stamp" node tests/e2e-stamps.mjs
@@ -12,13 +12,12 @@ import { makeStampedCard } from './stamp-helpers.mjs';
 
 const h = await startHarness();
 const t = reporter();
-// Log every message to the OCR worker (see section 5).
+// Log every read sent to the text reader's worker: how many areas (each an "OCR pass").
 await h.context.addInitScript(() => {
   window.__ocrLog = [];
   const post = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function (msg, ...rest) {
-    if (msg?.action === 'setParameters') window.__ocrLog.push(`P${msg.payload.params.tessedit_pageseg_mode}`);
-    else if (msg?.action === 'recognize') window.__ocrLog.push('R');
+    if (msg?.type === 'read') window.__ocrLog.push(msg.areas.length);
     return post.call(this, msg, ...rest);
   };
 });
@@ -83,7 +82,7 @@ for (const c of flat) {
 {
   const log = await page.evaluate(() => window.__ocrLog.length);
   const got = await scan(await makeStampedCard(page, CARDS.mewtwo30th, null), 'never-stamped');
-  const reads = await page.evaluate((n) => window.__ocrLog.slice(n).filter((m) => m === 'R').length, log);
+  const reads = await page.evaluate((n) => window.__ocrLog.slice(n).reduce((a, b) => a + b, 0), log);
   t.check(`a card never printed with a stamp: no artwork read (${reads} OCR passes)`, got.name === 'Mewtwo ex' && !got.art && !got.reason && reads <= 3, `${summary(got)} reads=${reads}`);
 }
 
@@ -154,9 +153,9 @@ for (const setup of ['toploader', 'turned', 'steep']) {
   t.check(`random photos: stamped version picked ${stampedOk}/${stampedN}`, stampedOk >= Math.ceil(stampedN * 0.75), misses.join('\n'));
 }
 
-// 5) Scanning a card while the Batch tab processes another photo: both share one OCR
-// worker, and a read must never run in the other job's OCR mode (a stamp read in block
-// mode loses the stamp). The other photo's name isn't a card, so it is re-read in block mode.
+// 5) Scanning a card while the Batch tab processes another photo: both share the reader's
+// worker, and each must read exactly what it reads alone (stamp and version). The other
+// photo's name isn't a card, so it takes more reads (the other way round, the whole card).
 {
   const stamped = await makePhoto(page, CARDS.aurorus, { ...PHOTOS.toploader, cardImage: await makeStampedCard(page, CARDS.aurorus, 'set-logo') });
   const other = await makePhoto(page, { ...CARDS.charizardEx, name: 'Qwyx Zorbat', stage: '' }, { background: 'wood', rotate: 5 });
@@ -174,21 +173,19 @@ for (const setup of ['toploader', 'turned', 'steep']) {
         return rows[chooseVariant(rows, { card, clues: res.clues })]?.label;
       };
       const alone = await identify(await canvas(a), () => {});
-      const log = window.__ocrLog.length;
-      const [both] = await Promise.all([identify(await canvas(a), () => {}), identify(await canvas(b), () => {})]);
-      const msgs = window.__ocrLog.slice(log);
+      const otherAlone = await identify(await canvas(b), () => {});
+      const [both, other] = await Promise.all([identify(await canvas(a), () => {}), identify(await canvas(b), () => {})]);
       return {
         alone: await version(alone),
         together: await version(both),
         art: [alone.clues.artText, both.clues.artText],
-        blockReads: msgs.filter((m) => m === 'P6').length,
-        // Every recognize right after its own mode change, never two mode changes in a row.
-        interleaved: msgs.some((m, i) => m[0] === 'P' && msgs[i + 1]?.[0] === 'P'),
+        other: [JSON.stringify(otherAlone.clues), JSON.stringify(other.clues)],
+        otherReads: other.debug.reads,
       };
     },
     { a: stamped.buffer.toString('base64'), b: other.buffer.toString('base64') },
   );
-  t.check('scanning while a batch runs: same stamp and version as alone', r.alone === 'Set Logo Stamp' && r.together === r.alone && r.art[0] === r.art[1] && r.blockReads > 0 && !r.interleaved, JSON.stringify(r));
+  t.check('scanning while a batch runs: same stamp and version as alone', r.alone === 'Set Logo Stamp' && r.together === r.alone && r.art[0] === r.art[1] && r.other[0] === r.other[1] && r.otherReads > 3, JSON.stringify(r));
 }
 
 // 6) The best match has no stamped version, but the card picked instead does: picking it
@@ -234,6 +231,7 @@ for (const setup of ['toploader', 'turned', 'steep']) {
   await stubNetwork(ctx, h.origin);
   const p2 = await ctx.newPage();
   p2.on('pageerror', (e) => h.logs.push(`pageerror: ${e.message}`));
+  await p2.route('**/data/details-*.json', (r) => r.abort()); // as for cards newer than the shipped details file
   let mode = 'ok';
   const asked = [];
   await p2.route(/https:\/\/api\.tcgdex\.net\/v2\/en\/cards\/.+/, async (route) => {
@@ -284,6 +282,7 @@ for (const setup of ['toploader', 'turned', 'steep']) {
   await stubNetwork(ctx, h.origin);
   const p3 = await ctx.newPage();
   p3.on('pageerror', (e) => h.logs.push(`pageerror: ${e.message}`));
+  await p3.route('**/data/details-*.json', (r) => r.abort()); // as for cards newer than the shipped details file
   let unreachable = false;
   const asked = [];
   await p3.route(/https:\/\/api\.tcgdex\.net\/v2\/en\/cards\/.+/, (route) => {

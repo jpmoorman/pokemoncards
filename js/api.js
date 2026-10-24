@@ -1,5 +1,7 @@
 // TCGdex API access (free, no key, CORS-enabled) with on-device caching.
 // https://tcgdex.dev — card data plus TCGplayer (USD) and Cardmarket (EUR) prices.
+import { ASSETS as FILES } from './assets.js'; // the big files shipped with the app
+import { readDetails } from './details.js';
 
 const BASE = 'https://api.tcgdex.net/v2/en';
 const ASSETS = 'https://assets.tcgdex.net/en/';
@@ -69,10 +71,13 @@ export async function loadCatalog({ force = false, onStatus } = {}) {
   const fresh = cached && Date.now() - cached.updated < INDEX_MAX_AGE;
   if (cached && !force) {
     if (!fresh) refreshCatalog().catch(() => {}); // stale-while-revalidate
+    loadDetails(); // the card details file comes next (see lookupCard)
     return expand(cached);
   }
   onStatus?.('Downloading card database (first time only)…');
-  return expand(await refreshCatalog());
+  const catalog = expand(await refreshCatalog());
+  loadDetails();
+  return catalog;
 }
 
 async function refreshCatalog() {
@@ -162,12 +167,51 @@ export async function getCard(id, { fresh = false } = {}) {
   }
 }
 
+// The card details file shipped with the app (js/details.js): HP, attacks, illustrator… of every
+// card up to when it was built, so ranking a scan needs no download, online or not. About 0.3 MB
+// to download once (the service worker keeps it) and about 2 MB in memory.
+const DETAILS_FILE = Object.keys(FILES).find((p) => /^data\/details-[\w-]+\.json$/.test(p));
+let shipped = null; // its reader once loaded: { size, card(id) }
+let shippedLoad = null; // the load in progress
+let shippedFailed = 0; // when the last load failed: not tried again for a minute
+
 /**
- * A card's details to rank a scan with (rerank.js): HP, attacks, illustrator… don't change, so
- * any saved copy will do. Otherwise one download, not retried, kept in memory only (getCard
- * saves it once the card is shown). Offline it sends nothing. Resolves to the card or null.
+ * Load the card details file (once; the card list's loading starts it). Resolves to its reader,
+ * or null if it can't be had right now (lookups then download each card, as before).
+ */
+export function loadDetails() {
+  if (shipped || shippedLoad) return shippedLoad || Promise.resolve(shipped);
+  if (!DETAILS_FILE || typeof fetch === 'undefined' || Date.now() - shippedFailed < MISS_MS) return Promise.resolve(null);
+  // (The service worker checks the download against FILES before keeping it.)
+  shippedLoad = fetch(new URL(`../${DETAILS_FILE}`, import.meta.url))
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then((json) => {
+      shipped = readDetails(json);
+      if (!shipped) throw new Error('unknown format');
+      return shipped;
+    })
+    .catch((e) => {
+      console.warn('card details file:', e.message || e);
+      shippedFailed = Date.now();
+      return null;
+    })
+    .finally(() => (shippedLoad = null));
+  return shippedLoad;
+}
+
+/**
+ * A card's details to rank a scan with (rerank.js). They come from the details file shipped
+ * with the app when it has the card (shaped like a TCGdex card, without the name, picture or
+ * prices). A card newer than the file: HP, attacks, illustrator… don't change, so any saved
+ * copy will do. Otherwise one download, not retried, kept in memory only (getCard saves it
+ * once the card is shown). Offline it sends nothing. Resolves to the card or null.
  */
 export async function lookupCard(id) {
+  const known = (shipped || (await loadDetails()))?.card(id);
+  if (known) return known;
   const mem = cardMem.get(id) || looked.get(id) || (await kvGet(`card:${id}`));
   if (mem) return mem.card;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;

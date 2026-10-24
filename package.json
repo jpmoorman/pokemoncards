@@ -7,16 +7,22 @@
   "scripts": {
     "start": "http-server -c-1 -p 8080 .",
     "test": "node --test tests/*.test.mjs",
-    "test:e2e": "node tests/e2e.mjs && node tests/e2e-photo.mjs && node tests/e2e-stamps.mjs && node tests/e2e-batch.mjs && node tests/e2e-trade.mjs",
+    "test:e2e": "node tests/e2e.mjs && node tests/e2e-photo.mjs && node tests/e2e-stamps.mjs && node tests/e2e-batch.mjs && node tests/e2e-trade.mjs && node tests/e2e-ui.mjs && node tests/e2e-ocr.mjs && node tests/e2e-offline.mjs && node tests/e2e-backup.mjs && node tests/e2e-bench-page.mjs",
     "test:e2e:core": "node tests/e2e.mjs",
     "test:e2e:photo": "node tests/e2e-photo.mjs",
     "test:e2e:stamps": "node tests/e2e-stamps.mjs",
     "test:e2e:batch": "node tests/e2e-batch.mjs",
-    "test:e2e:trade": "node tests/e2e-trade.mjs"
+    "test:e2e:trade": "node tests/e2e-trade.mjs",
+    "test:e2e:ui": "node tests/e2e-ui.mjs",
+    "test:e2e:ocr": "node tests/e2e-ocr.mjs",
+    "test:e2e:offline": "node tests/e2e-offline.mjs",
+    "test:e2e:backup": "node tests/e2e-backup.mjs",
+    "test:e2e:bench": "node tests/e2e-bench-page.mjs"
   },
   "devDependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
     "http-server": "^14.1.1",
+    "onnxruntime-web": "1.30.0",
     "playwright": "^1.56.1",
     "tesseract.js": "7.0.0"
   }

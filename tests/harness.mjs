@@ -1,5 +1,5 @@
-// Shared end-to-end test harness: serves the app, stubs every network API with
-// fixtures, and loads real Tesseract OCR from node_modules.
+// Shared end-to-end test harness: serves the app (with its own PP-OCR models and runtime),
+// stubs every network API with fixtures, and points the Tesseract fallback at node_modules.
 //   const h = await startHarness();  const page = await h.newPage();  ...  await h.close();
 import { chromium } from 'playwright';
 import http from 'node:http';
@@ -13,7 +13,7 @@ export const results = path.join(root, 'test-results');
 export const catalog = JSON.parse(fs.readFileSync(path.join(fixtures, 'catalog.json')));
 export const EUR_USD = 1.12;
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.gz': 'application/gzip', '.webmanifest': 'application/manifest+json' };
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.txt': 'text/plain', '.onnx': 'application/octet-stream', '.css': 'text/css', '.json': 'application/json', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.gz': 'application/gzip', '.webmanifest': 'application/manifest+json' };
 const SVG = (fill) => `<svg xmlns="http://www.w3.org/2000/svg" width="63" height="88"><rect width="63" height="88" fill="${fill}"/></svg>`;
 
 function apiRoute(route) {

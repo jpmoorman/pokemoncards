@@ -1,5 +1,5 @@
 // End-to-end check of scanning, matching, versions/prices, search and collection:
-// runs the real app + real Tesseract OCR in headless Chromium against generated
+// runs the real app + real PP-OCR text reading in headless Chromium against generated
 // card images. All network APIs are stubbed with fixtures (see harness.mjs).
 //   npm install && npm run test:e2e
 import fs from 'node:fs';

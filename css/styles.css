@@ -258,6 +258,15 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 .citem .c-main { min-width: 0; cursor: pointer; }
 .citem img { cursor: pointer; }
 .btn.subtle { background: none; border-color: transparent; color: var(--muted); }
+/* Backup file and the one-time Add to Home Screen tip (Saved tab). */
+.backup { margin-top: 18px; padding-top: 4px; border-top: 1px solid var(--border); }
+.backup .section-title { margin-top: 12px; }
+.backup p { margin: 0 0 10px; }
+.tip {
+  margin: 0 0 12px; padding: 10px 12px; border-radius: 12px; font-size: .9rem;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.tip p { margin: 0 0 8px; }
 
 .modal { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .6); }

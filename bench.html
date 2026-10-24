@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <!-- Hidden speed test (not linked from the app): open <the app's address>/bench.html. -->
+  <title>Scanner speed test</title>
+  <meta name="robots" content="noindex" />
+  <meta name="theme-color" content="#14161c" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <style>
+    :root {
+      --bg: #14161c; --surface: #1e2129; --border: #353a46; --text: #eef0f4; --muted: #9aa1b0;
+      --accent: #ffcb05; --accent-ink: #1b1b1b; --good: #4fd18b; --bad: #ff6b6b; --warn: #ffb547;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body { background: var(--bg); color: var(--text); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+    main { max-width: 760px; margin: 0 auto; padding: 16px 16px calc(32px + env(safe-area-inset-bottom, 0px)); }
+    h1 { font-size: 1.35rem; margin: 4px 0 8px; }
+    h2 { font-size: 1.05rem; margin: 22px 0 6px; }
+    p { margin: 6px 0; }
+    .muted { color: var(--muted); }
+    .small { font-size: .85rem; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+    .btn { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 12px; padding: 12px 18px; font: inherit; font-weight: 600; min-height: 44px; cursor: pointer; }
+    .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+    .btn:disabled { opacity: .5; }
+    .status { min-height: 1.4em; font-weight: 600; }
+    .status.error { color: var(--bad); }
+    .warn { border: 1px solid var(--warn); border-radius: 10px; padding: 8px 12px; }
+    table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+    th, td { text-align: left; padding: 5px 8px 5px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+    .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .wide th, .wide td { white-space: nowrap; }
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    textarea { width: 100%; min-height: 9em; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 8px; font: 12px/1.35 ui-monospace, Menlo, monospace; }
+    /* Stand-in for the scanner's camera view, off screen: the camera scans are cut out of it
+       the way the app cuts the card guide out of the live picture. */
+    .stage { position: fixed; left: -20000px; top: 0; overflow: hidden; }
+    .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .stage div { position: absolute; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Scanner speed test</h1>
+    <p>This measures how fast card scanning runs on this phone, so the numbers can be sent back and compared. It takes about a minute or two.</p>
+    <p class="muted small">It opens the camera once, only to read its resolution: no picture is taken or sent. The sample cards are public card pictures from TCGdex (drawn ones if those can't be downloaded). Nothing you saved in the app is changed.</p>
+    <p class="muted small">Open the app itself once first (and reload it if it offers an update), so this page measures the latest version. For first-time numbers, reload this page just before tapping Run. Keep the screen on and this page open until it says it is done.</p>
+    <div class="row">
+      <button class="btn primary" id="run" type="button">Run</button>
+      <button class="btn" id="copy" type="button" disabled>Copy results</button>
+      <button class="btn" id="share" type="button" hidden disabled>Share</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite"></p>
+    <div id="out"></div>
+    <div id="copy-box" hidden>
+      <p class="muted small">Copying didn't work here: select all of the text below and copy it.</p>
+      <textarea id="copy-text" readonly></textarea>
+    </div>
+  </main>
+  <script type="module" src="bench-page.js"></script>
+</body>
+</html>

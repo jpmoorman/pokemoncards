@@ -2,10 +2,16 @@
 // against a snapshot of the full TCGdex catalog, and scores each step.
 //
 //   node tests/bench.mjs --photos ../pokemoncards-testphotos [--limit 50] [--only base,sm] [--split dev|holdout]
-//                        [--out results.json] [--save-cards <dir>]
+//                        [--split-by photo|card] [--out results.json] [--save-cards <dir>]
 // --split   use only the "dev" (tuning) or "holdout" (final check) half, same split as rank-eval.mjs
+// --split-by  halve by photo id (default, the split every number so far used) or by card id
+//           (all photos of a card in the same half: for new, clean holdouts; see tests/printing.mjs)
 // --save-cards  also save each straightened card as <dir>/<photo id>.jpg for fast OCR experiments
 //
+// Besides the card it scores the printed version the result sheet would show first (1st Edition,
+// reverse holo, stamps…) against the label's version: "right card + printing" (tests/printing.mjs).
+// Each row gets version, printing (the version shown), printingOk (true / false / null when
+// the label can't be scored) and printingWhy.
 // The photo folder needs labels.json, raw/<id>.jpg and catalog/{cards,sets,set-codes}.json,
 // plus catalog/details.json.gz for the card details identify's second pass looks up (without
 // it every lookup is "not found", as offline) (see the private pokemoncards-testphotos repo).
@@ -14,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { startHarness, results } from './harness.mjs';
+import { splitOf, sheetCard, scorePrinting, printingSummary, printingReport } from './printing.mjs';
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -24,20 +31,15 @@ const limit = parseInt(arg('limit', '0'), 10);
 const only = (arg('only', '') || '').split(',').filter(Boolean);
 const outFile = arg('out', path.join(results, 'bench.json'));
 const split = arg('split', 'all');
+const splitBy = arg('split-by', 'photo');
 const saveCards = arg('save-cards', '');
 if (saveCards) fs.mkdirSync(saveCards, { recursive: true });
-
-// Same stable split as tests/rank-eval.mjs.
-function half(id) {
-  let h = 2166136261;
-  for (const ch of id) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
-  return (h >>> 0) % 2 ? 'holdout' : 'dev';
-}
 
 const labels = JSON.parse(fs.readFileSync(path.join(dir, 'labels.json')))
   .filter((l) => l.tcgdexId && l.checkedBySecondLabeler)
   .filter((l) => !only.length || only.some((o) => l.tcgdexId.startsWith(o)))
-  .filter((l) => split === 'all' || half(l.id) === split);
+  // Same stable split as tests/rank-eval.mjs.
+  .filter((l) => split === 'all' || splitOf(l, splitBy) === split);
 const todo = limit ? labels.slice(0, limit) : labels;
 const cards = fs.readFileSync(path.join(dir, 'catalog/cards.json'), 'utf8');
 const sets = fs.readFileSync(path.join(dir, 'catalog/sets.json'), 'utf8');
@@ -153,6 +155,9 @@ for (const [i, l] of todo.entries()) {
     numberOk: r.num != null && r.num === num(l.number),
     nameOk: !!r.name && (norm(r.name).includes(norm(l.name).slice(0, 6)) || norm(l.name).includes(norm(r.name))),
   };
+  // The printed version the result sheet shows first, against the label's (tests/printing.mjs).
+  const p = scorePrinting(r.top[0], sheetCard(l.tcgdexId, { cardById, setById, details }), r.clues, l);
+  Object.assign(row, { version: l.version, printing: p.printing, printingOk: p.ok, printingWhy: p.why });
   rows.push(row);
   const done = i + 1;
   if (done % 10 === 0 || done === todo.length) {
@@ -181,7 +186,12 @@ const summary = {
   numberRead: rows.filter((x) => x.numberOk).length,
   errors: rows.filter((x) => x.error).length,
   avgSeconds: +(rows.reduce((s, x) => s + x.ms, 0) / n / 1000).toFixed(2),
+  splitBy,
 };
+// Right card and printing, where the label names a printing (see tests/printing.mjs).
+const printings = printingSummary(rows.map((x) => ({ version: x.version, score: { ok: x.printingOk, why: x.printingWhy } })));
+summary.printing = printings.all;
+summary.printingByVersion = printings.byVersion;
 console.log(`
 === ACCURACY on ${n} real photos ===
 Correct card (1st guess):   ${pct(summary.top1, n)}  (${summary.top1})
@@ -191,6 +201,10 @@ Name read:                  ${pct(summary.nameRead, n)}
 Number read:                ${pct(summary.numberRead, n)}
 Errors:                     ${summary.errors}
 Average time per photo:     ${summary.avgSeconds}s (desktop CPU)
+Right card + printing:      ${pct(printings.all.printing, printings.all.scored)}  (${printings.all.printing} of ${printings.all.scored} photos whose label names a printing)
+
+By printing (labelled version; "version picked right" counts right cards printed more than one way):
+${printingReport(printings)}
 
 By era:
 ${group('era')}

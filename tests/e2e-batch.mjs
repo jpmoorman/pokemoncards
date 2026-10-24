@@ -1,5 +1,5 @@
 // End-to-end check of the Batch tab: save photos now, identify them later, review, save.
-// Real app + real Tesseract OCR in headless Chromium; network stubbed (see harness.mjs).
+// Real app + real PP-OCR text reading in headless Chromium; network stubbed (see harness.mjs).
 //   CHROMIUM_PATH=/opt/pw-browsers/chromium node tests/e2e-batch.mjs
 import fs from 'node:fs';
 import path from 'node:path';

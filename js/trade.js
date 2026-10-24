@@ -543,6 +543,11 @@ export function renderTrade() {
 
 export function initTrade() {
   on('card:action', onCardAction);
+  // A backup file replaced the saved trade (Saved tab, see backup.js).
+  on('backup:imported', () => {
+    trade = load();
+    renderTrade();
+  });
   on('sheet:closed', () => (editing = null));
   on('fx:ready', renderTrade);
   window.addEventListener('resize', () => $('#view-trade')?.style.setProperty('--trade-top', `${$('.topbar')?.offsetHeight || 0}px`));

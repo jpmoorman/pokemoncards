@@ -64,10 +64,21 @@ test('years, Pokédex numbers, levels, HP and weights are no numbers', () => {
   }
 });
 
-test('a 1- or 2-digit number needs its slash read', () => {
-  // "41102" may be 4/102 or 41/102: not guessed.
-  assert.deepEqual(read('41102 *'), []);
+test('a 1- or 2-digit number with its slash read as 1 or lost needs the rarity mark after it', () => {
   assert.deepEqual(read('4/102 *'), ['4/102']);
+  // Older cards print the mark right after the set size ("10/64★").
+  assert.deepEqual(read('GAMEFREAK. 1999 Wizards.\n10164★'), ['10/64']);
+  assert.deepEqual(read('Wre1664*'), ['16/64']);
+  assert.deepEqual(read('LV.76 #6\n4102*'), ['4/102']);
+  // More than one reading fits: both are given, the name decides.
+  assert.deepEqual(read('41102 *'), ['4/102', '41/102']);
+  assert.deepEqual(read('1164★'), ['1/64', '11/64']);
+  // No mark, a size that doesn't exist, a number past its size: no number.
+  assert.deepEqual(read('©1999 Wizards 41102'), []);
+  assert.deepEqual(read('7117*'), []);
+  assert.deepEqual(read('9520*'), []);
+  // ...nor when a number was found the regular way.
+  assert.deepEqual(read('15/64 LV.35\n15164★'), ['15/64']);
 });
 
 test('a number printed zero-padded counts on its own, when nothing else was read', () => {

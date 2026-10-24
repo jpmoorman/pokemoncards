@@ -1,12 +1,16 @@
-// "Collection" tab: saved cards with a running USD total, price refresh and CSV export.
-import { $, el, on, toast, confirmDialog } from './ui.js';
+// "Collection" tab: saved cards with a running USD total, price refresh, CSV export, and the
+// backup file (Export backup / Import backup) with its Home Screen tips (see backup.js).
+import { $, el, on, toast, actionToast, confirmDialog, navigate } from './ui.js';
 import { formatMoney } from './prices.js';
 import { entryKey, refreshEntry, totalUsd, unitUsd, entryNumber } from './entry.js';
 import { getCard, cardFetchedAt } from './api.js';
 import { entryRow } from './components.js';
 import { openCard } from './sheet.js';
+import { appMode, persistStorage, savedTrade, restoreTrade, makeBackup, readBackup, backupFileName, cardCount } from './backup.js';
 
 const KEY = 'collection.v1';
+const TIP_KEY = 'tip.homeScreen'; // 'done': the Add to Home Screen tip was dismissed (or a backup exported)
+const OFFER_KEY = 'tip.importOffer'; // 'done': the Home Screen app offered the import once
 
 export function loadCollection() {
   try {
@@ -49,6 +53,7 @@ function renderCount(items = loadCollection()) {
 export function renderCollection() {
   const items = loadCollection();
   renderCount(items);
+  renderTips(items);
   $('#collection-total').textContent = formatMoney(totalUsd(items));
   $('#collection-empty').hidden = !!items.length;
   $('#collection-list').replaceChildren(
@@ -114,11 +119,19 @@ export function initCollection() {
           .join(',');
       }),
     ];
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
-    const a = el('a', { href: URL.createObjectURL(blob), download: 'pokemon-collection.csv' });
-    document.body.append(a);
-    a.click();
-    a.remove();
+    download(new Blob([lines.join('\n')], { type: 'text/csv' }), 'pokemon-collection.csv');
+  });
+
+  $('#btn-backup-export').addEventListener('click', exportBackup);
+  $('#btn-backup-import').addEventListener('click', () => $('#backup-file').click());
+  $('#backup-file').addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) importBackup(file);
+  });
+  $('#tip-home-screen-ok').addEventListener('click', () => {
+    remember(TIP_KEY);
+    renderTips();
   });
 
   $('#btn-clear-collection')?.addEventListener('click', async () => {
@@ -130,4 +143,104 @@ export function initCollection() {
   });
 
   renderCount();
+
+  // Ask the browser to keep the saved cards (when there are some: Firefox would ask the user).
+  if (loadCollection().length || savedTrade()) persistStorage();
+  on('card:action', ({ action }) => action === 'collection' && persistStorage());
+  offerImport();
+}
+
+function download(blob, name) {
+  const a = el('a', { href: URL.createObjectURL(blob), download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+// ---------------- backup file ----------------
+
+const seen = (key) => {
+  try {
+    return localStorage.getItem(key) === 'done';
+  } catch {
+    return true; // no storage: no tips either
+  }
+};
+const remember = (key) => {
+  try {
+    localStorage.setItem(key, 'done');
+  } catch {
+    /* storage full */
+  }
+};
+
+async function exportBackup() {
+  const items = loadCollection();
+  const trade = savedTrade();
+  if (!items.length && !trade) {
+    toast('Nothing saved yet');
+    return;
+  }
+  const name = backupFileName();
+  const file = new File([JSON.stringify(makeBackup(items, trade), null, 1)], name, { type: 'application/json' });
+  remember(TIP_KEY); // the tip's advice was taken
+  renderTips(items);
+  // A Home Screen app on iPhone can't always save a download: the share sheet has "Save to Files".
+  if (appMode().standalone && navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: 'Card Scanner backup' });
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return; // closed the share sheet
+    }
+  }
+  download(file, name);
+}
+
+async function importBackup(file) {
+  let data;
+  try {
+    data = readBackup(JSON.parse(await file.text()));
+  } catch (e) {
+    toast(e instanceof SyntaxError ? "That file isn't a backup from this app." : e.message, 4500);
+    return;
+  }
+  const items = loadCollection();
+  const trade = savedTrade();
+  const takesTrade = !!data.trade;
+  if (!data.collection.length && !takesTrade) {
+    toast('That backup has no saved cards.', 4000);
+    return;
+  }
+  // Anything saved here is replaced (not merged): ask first.
+  const replaces = [items.length && `the ${cardCount(items)} saved here`, takesTrade && trade && 'your current trade'].filter(Boolean);
+  if (replaces.length) {
+    const what = [data.collection.length && cardCount(data.collection), takesTrade && 'a trade'].filter(Boolean).join(' and ');
+    if (!(await confirmDialog(`Replace ${replaces.join(' and ')} with the backup's ${what}?`, 'Replace'))) return;
+  }
+  save(data.collection.map((e) => ({ ...e, key: entryKey(e) })));
+  if (takesTrade) restoreTrade(data.trade);
+  renderCollection();
+  toast(`Imported ${cardCount(data.collection)}${takesTrade ? ' and your trade' : ''}`, 3000);
+  persistStorage();
+}
+
+/** Home Screen tips: in a Safari tab with saved cards, add to Home Screen (once); in the Home Screen app, still empty: import. */
+function renderTips(items = loadCollection()) {
+  const { iosTab, standalone } = appMode();
+  $('#tip-home-screen').hidden = !(iosTab && items.length && !seen(TIP_KEY));
+  $('#import-hint').hidden = !(standalone && !items.length);
+}
+
+/** Once, in a Home Screen app that has nothing saved yet: offer to bring the cards over from Safari. */
+function offerImport() {
+  if (!appMode().standalone || seen(OFFER_KEY) || loadCollection().length || savedTrade()) return;
+  remember(OFFER_KEY);
+  setTimeout(() => {
+    actionToast('Moving from Safari? Import your backup', 'Import', () => {
+      navigate('collection');
+      $('#backup-file').click();
+    }, { ms: 10000 });
+  }, 1500);
 }

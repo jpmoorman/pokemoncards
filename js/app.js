@@ -2,7 +2,7 @@
 import { $, $$, el, on, toast, actionToast, setStatus, emit } from './ui.js';
 import { initCatalog, catalog, catalogReady } from './catalog.js';
 import { manualSearch } from './match.js';
-import { startCamera, stopCamera, captureGuide, fileToCanvas, getWorker, setTorch, torchSupported } from './ocr.js';
+import { startCamera, stopCamera, captureGuide, fileToCanvas, warmUp, setTorch, torchSupported } from './ocr.js';
 import { identify } from './identify.js';
 import { loadRate } from './fx.js';
 import { initSheet, showResults, openCard, closeSheet, fillSetSelect, parseNumberInput } from './sheet.js';
@@ -11,6 +11,7 @@ import { mountSetPicker } from './setpicker.js';
 import { initCollection, renderCollection } from './collection.js';
 import { initBatch, renderBatch, enqueueCanvas, enqueueFiles, batchCount } from './batch.js';
 import { initTrade, renderTrade } from './trade.js';
+import { startOffline } from './offline.js';
 
 const state = {
   stream: null,
@@ -54,8 +55,12 @@ async function init() {
 
   loadRate().then((info) => emit('fx:ready', info));
 
-  // Warm up text recognition in the background so the first scan is quick.
-  setTimeout(() => getWorker().catch(() => {}), 1500);
+  // Get text recognition ready in the background so the first scan is quick: once the card
+  // list is in (on a first visit both download; the list comes first), after a paint. A scan
+  // started meanwhile waits for the same start-up.
+  catalogReady()
+    .catch(() => {})
+    .then(() => requestAnimationFrame(() => setTimeout(warmUp, 300)));
 
   // Start the camera straight away if permission was already granted.
   try {
@@ -65,9 +70,7 @@ async function init() {
     /* permissions API not available (iOS) */
   }
 
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
+  startOffline(); // service worker: works offline, keeps the big files (offline.js)
 }
 
 // ---------------- tabs ----------------

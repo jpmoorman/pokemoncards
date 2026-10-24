@@ -37,6 +37,9 @@ test('ignores copyright years and attack text', () => {
 test('parses trainer gallery and promo numbers', () => {
   assert.deepEqual(num(parseBottomText('TG05/TG30').numbers[0]), { prefix: 'TG', num: 5, total: 30 });
   assert.deepEqual(num(parseBottomText('SWSH050').numbers[0]), { prefix: 'SWSH', num: 50, total: null });
+  // A zero read as the letter O (PP-OCR on an HGSS promo); a word like "SMOOTH" is no number.
+  assert.deepEqual(num(parseBottomText('©2010 Pokémon/Nintendo\nHGSSO8').numbers[0]), { prefix: 'HGSS', num: 8, total: null });
+  assert.equal(parseBottomText('SMOOTH ME O').numbers.length, 0);
 });
 
 test('cleans name lines', () => {

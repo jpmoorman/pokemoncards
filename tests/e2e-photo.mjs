@@ -1,8 +1,8 @@
 // End-to-end check of scanning whole phone photos: the card has to be found in the
 // picture (carpet / wood / table, turned, tilted, in a toploader with a price sticker
 // and glare; also lying sideways or upside down), straightened and identified, in a
-// bounded number of OCR passes. Also camera guide crops, and two scans at once sharing
-// the OCR worker. Runs the real app + real Tesseract OCR.
+// bounded number of text reads. Also camera guide crops, and two scans at once sharing
+// the text reader's worker. Runs the real app + real PP-OCR (models from models/).
 //   CHROMIUM_PATH=/opt/pw-browsers/chromium node tests/e2e-photo.mjs
 // Extra real photos (kept out of the repo) can be checked too:
 //   PHOTOS="/path/aurorus.jpg=me03-024,/path/other.jpg=sv03-125" node tests/e2e-photo.mjs
@@ -13,13 +13,13 @@ import { makePhoto, PHOTOS, cornerError } from './photo-helpers.mjs';
 
 const h = await startHarness();
 const t = reporter();
-// Log every message to the OCR worker: reads must never interleave.
+// Log every read sent to the text reader's worker: how many areas (each one text search +
+// reading what it found: an "OCR pass" below) and how big a picture.
 await h.context.addInitScript(() => {
   window.__ocrLog = [];
   const post = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function (msg, ...rest) {
-    if (msg?.action === 'setParameters') window.__ocrLog.push(`P${msg.payload.params.tessedit_pageseg_mode}`);
-    else if (msg?.action === 'recognize') window.__ocrLog.push('R');
+    if (msg?.type === 'read') window.__ocrLog.push({ areas: msg.areas.length, pixels: msg.image.width * msg.image.height });
     return post.call(this, msg, ...rest);
   };
 });
@@ -63,28 +63,20 @@ async function identifyIn(buf, turns = 0) {
       let on = true;
       const watch = () => on && (painted.add(statuses.at(-1)), requestAnimationFrame(watch));
       requestAnimationFrame(watch);
-      // Size of every picture OCR'd (reading time grows with it).
-      const worker = await (await import('/js/ocr.js')).getWorker();
-      if (!worker.__sized) {
-        const recognize = worker.recognize.bind(worker);
-        worker.recognize = (img, ...rest) => {
-          window.__ocrSizes.push(img.width * img.height);
-          return recognize(img, ...rest);
-        };
-        worker.__sized = true;
-      }
-      window.__ocrSizes = [];
       const log = window.__ocrLog.length;
       const t0 = performance.now();
       const r = await identify(canvas, (m) => statuses.push(m));
       on = false;
+      // Size of every picture sent to the reader (reading time grows with it).
+      const sent = window.__ocrLog.slice(log);
       return {
-        megapixels: +(Math.max(0, ...window.__ocrSizes) / 1e6).toFixed(2),
+        megapixels: +(Math.max(0, ...sent.map((m) => m.pixels)) / 1e6).toFixed(2),
         id: r.ranked[0]?.card.id,
         name: r.clues.nameBest,
         number: r.clues.numbers[0]?.text,
         detect: r.debug.detect,
-        reads: window.__ocrLog.slice(log).filter((m) => m === 'R').length,
+        reads: sent.reduce((n, m) => n + m.areas, 0),
+        steps: r.debug.steps,
         art: r.clues.artText,
         statuses,
         painted: [...painted],
@@ -258,37 +250,37 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
   }
 }
 
-// 6) Reading cost: a photo with nothing readable gives up quickly (no as-is read of the
-// whole photo as if it were the card, no stamp read), and the status is painted before
-// the card is looked for.
+// 6) Reading cost: a photo with nothing readable gives up quickly (its name and number
+// areas read as is, as it is card-shaped, then the whole photo either way up; no stamp
+// read), and the status is painted before the card is looked for.
 {
   const empty = await makePhoto(page, CARDS.aurorus, { noCard: true, background: 'carpet' });
   const r = await identifyIn(empty.buffer);
-  t.check(`photo with no card: at most 3 OCR passes (${r.reads}, ${r.seconds}s)`, r.reads <= 3 && !r.art && !r.statuses.includes('Checking for stamps…'), JSON.stringify(r));
+  t.check(`photo with no card: at most 5 OCR passes (${r.reads}, ${r.seconds}s)`, r.reads <= 5 && !r.art && !r.statuses.includes('Checking for stamps…'), JSON.stringify(r));
   // A phone camera's 12-megapixel photo: the whole picture is read shrunk (it took over a
   // minute at full size, 6.75 megapixels once loaded).
   const big = await makePhoto(page, CARDS.aurorus, { noCard: true, background: 'carpet', width: 3024, height: 4032 });
   const rb = await identifyIn(big.buffer);
-  t.check(`phone-size photo with no card gives up in ${rb.seconds}s: ${rb.reads} OCR passes, none over 2.6 megapixels (${rb.megapixels})`, rb.reads <= 3 && rb.megapixels <= 2.6, JSON.stringify(rb));
+  t.check(`phone-size photo with no card gives up in ${rb.seconds}s: ${rb.reads} OCR passes, none over 2.6 megapixels (${rb.megapixels})`, rb.reads <= 5 && rb.megapixels <= 2.6, JSON.stringify(rb));
   // An upright card whose name and number can't be read (a sticker over the name, no
-  // number printed): after the card's own areas, the whole photo is read shrunk too (it
-  // was read at full size, 3 megapixels here). The number areas read nothing, so their
-  // number spots are read too, for black and for white text (two small passes).
+  // number printed): its 3 areas, the same the other way round and the next-best outline's,
+  // then the whole card either way round and the stamp area (never the photo at full size:
+  // 3 megapixels here).
   const covered = await makePhoto(page, { ...CARDS.charizardEx, bottomLeft: 'G  OBF EN' }, { ...PHOTOS.flat, sticker: 'name' });
   const rc = await identifyIn(covered.buffer);
-  t.check(`card with its name and number covered gives up in ${rc.reads} OCR passes, none over 2 megapixels (${rc.megapixels}, ${rc.seconds}s)`, rc.reads <= 11 && rc.megapixels <= 2.1, JSON.stringify(rc));
+  t.check(`card with its name and number covered gives up in ${rc.reads} OCR passes, none over 2 megapixels (${rc.megapixels}, ${rc.seconds}s)`, rc.reads <= 12 && rc.megapixels <= 2.1, JSON.stringify(rc));
   const photo = await makePhoto(page, CARDS.mewtwo30th, PHOTOS.flat);
   const m = await identifyIn(photo.buffer);
   t.check('"Finding the card…" is shown before the card is looked for', m.id === '30th-157' && m.painted.includes('Finding the card…'), JSON.stringify(m));
   // The user may pick another match (or re-match) that has stamped versions: the artwork
   // text is there for that even when the best match is never stamped.
-  t.check('the stamp area is read for a card printed without stamps too', m.statuses.includes('Checking for stamps…') && typeof m.art === 'string' && m.reads <= 3, JSON.stringify(m));
+  t.check('the stamp area is read for a card printed without stamps too', m.statuses.includes('Checking for stamps…') && typeof m.art === 'string' && m.reads <= 4, JSON.stringify(m));
 }
 
-// 7) Camera guide crops: a card filling the guide is read as is (name + number + stamp
-// area, no "Finding the card…" step); upside down in the guide still reads. A card held
-// further away, filling 65% of the guide's width, is straightened first instead of
-// being read as is, turned around and only then looked for (9 passes).
+// 7) Camera guide crops: a card filling the guide is read as is (name + 2 number areas +
+// stamp area, no "Finding the card…" step); upside down in the guide still reads (the name
+// and number areas once more, turned). A card held further away, filling 65% of the
+// guide's width, is straightened first instead of being read as is.
 {
   const png = await makeCard(page, CARDS.charizardEx);
   for (const [upsideDown, k] of [[false, 1], [true, 1], [false, 0.67], [true, 0.67]]) {
@@ -332,11 +324,11 @@ for (const item of (process.env.PHOTOS || '').split(',').filter(Boolean)) {
         const statuses = [];
         const log = window.__ocrLog.length;
         const res = await identify(crop, (m) => statuses.push(m));
-        return { id: res.ranked[0]?.card.id, size: `${crop.width}x${crop.height}`, detect: res.debug.detect, reads: window.__ocrLog.slice(log).filter((m) => m === 'R').length, statuses };
+        return { id: res.ranked[0]?.card.id, size: `${crop.width}x${crop.height}`, detect: res.debug.detect, reads: window.__ocrLog.slice(log).reduce((n, m) => n + m.areas, 0), statuses };
       },
       { b64: png.toString('base64'), upsideDown, k },
     );
-    const max = upsideDown ? 8 : 3; // name + number + the stamp area
+    const max = upsideDown ? 7 : 4; // name + 2 number areas (twice upside down) + the stamp area
     const what = `camera guide crop${k < 1 ? `, card ${Math.round(k * 97)}% of the guide` : ''}${upsideDown ? ', card upside down,' : ''}`;
     t.check(`${what} is read in ${r.reads} OCR passes`, r.id === 'sv03-125' && r.reads <= max && !r.statuses.includes('Finding the card…'), JSON.stringify(r));
   }
@@ -374,28 +366,55 @@ for (const [style, fill, stroke] of [['white number', '#fff', '#111'], ['outline
   t.check(`a full-art card's ${style} is read (${r.number}, ${r.reads} OCR passes)`, r.id === 'sv03-125' && r.number === '125/197' && r.reads <= 6, JSON.stringify(r));
 }
 
-// 8) Two scans at once (Batch processing while scanning a card): every read keeps its
-// own OCR mode, so each gives exactly what it gives alone.
+// 8) Two scans at once (Batch processing while scanning a card) share the reader's worker:
+// each gives exactly what it gives alone.
+{
+  const pngs = [await makeCard(page, CARDS.aurorus), await makeCard(page, CARDS.charizardEx)];
+  const r = await page.evaluate(async (b64s) => {
+    const { readCard, readStamps } = await import('/js/ocr.js');
+    const cards = await Promise.all(
+      b64s.map(async (b64) => {
+        const img = new Image();
+        img.src = `data:image/png;base64,${b64}`;
+        await img.decode();
+        const card = document.createElement('canvas');
+        [card.width, card.height] = [img.width, img.height];
+        card.getContext('2d').drawImage(img, 0, 0);
+        return card;
+      }),
+    );
+    const read = async (card) => {
+      const res = await readCard(card, () => {});
+      return JSON.stringify([res.clues, res.debug.name, res.debug.bottom, await readStamps(card)]);
+    };
+    const alone = [await read(cards[0]), await read(cards[1])];
+    const together = await Promise.all(cards.map(read));
+    return { alone, together };
+  }, pngs.map((p) => p.toString('base64')));
+  t.check('two scans at once read the same as each alone', r.alone[0] === r.together[0] && r.alone[1] === r.together[1] && r.alone[0] !== r.alone[1], JSON.stringify(r));
+}
+
+// 9) The reader stops when idle (giving its memory back) and starts again for the next scan.
 {
   const png = await makeCard(page, CARDS.aurorus);
   const r = await page.evaluate(async (b64) => {
-    const { readRegion, NAME_REGION } = await import('/js/ocr.js');
+    const { stopReader, readerStats, readCard } = await import('/js/ocr.js');
+    const before = await readerStats();
+    stopReader();
     const img = new Image();
     img.src = `data:image/png;base64,${b64}`;
     await img.decode();
     const card = document.createElement('canvas');
     [card.width, card.height] = [img.width, img.height];
     card.getContext('2d').drawImage(img, 0, 0);
-    const sparse = (await readRegion(card, NAME_REGION, { psm: 11 })).text;
-    const block = (await readRegion(card, NAME_REGION, { psm: 6 })).text;
-    const log = window.__ocrLog.length;
-    const [a, b] = await Promise.all([readRegion(card, NAME_REGION, { psm: 11 }), readRegion(card, NAME_REGION, { psm: 6 })]);
-    return { sparse, block, a: a.text, b: b.text, log: window.__ocrLog.slice(log).join(' ') };
+    const res = await readCard(card, () => {});
+    return { before, after: await readerStats(), name: res.clues.nameBest };
   }, png.toString('base64'));
-  t.check('two reads at once keep their own OCR mode', r.a === r.sparse && r.b === r.block && r.log === 'P11 R P6 R', JSON.stringify(r));
+  t.check('the reader starts again after being stopped', r.before.engine === 'ppocr' && r.after.engine === 'ppocr' && r.name === 'Aurorus' && r.after.wasmBytes > 0, JSON.stringify(r));
 }
 
-// Tesseract's own complaints about blank or tiny areas (a sticker, a bare photo) aren't page errors.
+// Tesseract's own complaints about blank or tiny areas (a sticker, a bare photo) aren't page
+// errors (only seen when the fallback reads).
 const errors = h.errors().filter((l) => !/^error: (Image too small to scale|Line cannot be recognized|Error in (boxClipToRectangle|pixScanForForeground))/.test(l));
 t.check('no page errors', !errors.length, errors.join('\n'));
 await h.close();

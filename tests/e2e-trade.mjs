@@ -1,6 +1,6 @@
 // End-to-end check of the Trade tab: build a trade from a scan, Search and the
 // collection, change versions, quantities, swap, persist, refresh, share, clear.
-// Real app + real Tesseract OCR in headless Chromium; network stubbed (see harness.mjs).
+// Real app + real PP-OCR text reading in headless Chromium; network stubbed (see harness.mjs).
 //   CHROMIUM_PATH=/opt/pw-browsers/chromium node tests/e2e-trade.mjs
 import fs from 'node:fs';
 import path from 'node:path';

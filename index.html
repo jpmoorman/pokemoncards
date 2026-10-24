@@ -84,6 +84,11 @@
 
     <!-- COLLECTION -->
     <section id="view-collection" class="view">
+      <div class="tip" id="tip-home-screen" hidden>
+        <p><b>Keep your cards safe:</b> add this app to your Home Screen (Share, then <b>Add to Home Screen</b>). Safari can delete a website's saved cards if you don't open it for a while.</p>
+        <p class="muted small">The Home Screen app has its own storage, so first tap <b>Export backup</b> at the bottom of this page, then <b>Import backup</b> in the Home Screen app.</p>
+        <button class="btn small" id="tip-home-screen-ok" type="button">Got it</button>
+      </div>
       <div class="collection-head">
         <div>
           <div class="muted small">Estimated total (USD)</div>
@@ -96,7 +101,17 @@
       </div>
       <ul class="collection" id="collection-list"></ul>
       <p class="muted center" id="collection-empty">No cards saved yet. Scan a card and tap <b>Add to collection</b>.</p>
+      <p class="muted center small" id="import-hint" hidden>Moving from Safari? Open this app in Safari, tap <b>Export backup</b> on its Saved tab, then tap <b>Import backup</b> below.</p>
       <p class="center"><button class="btn small subtle" id="btn-clear-collection" type="button">Remove all</button></p>
+      <div class="backup">
+        <h3 class="section-title">Backup</h3>
+        <p class="muted small">Your saved cards and trade are kept only in this browser on this phone. A backup file keeps them safe and moves them to another phone, or to the Home Screen app.</p>
+        <div class="row">
+          <button class="btn small" id="btn-backup-export" type="button">Export backup</button>
+          <button class="btn small" id="btn-backup-import" type="button">Import backup</button>
+          <input type="file" id="backup-file" accept=".json,application/json" hidden />
+        </div>
+      </div>
     </section>
   </main>
 

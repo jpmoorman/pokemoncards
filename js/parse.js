@@ -31,11 +31,15 @@ const SUBSET_PREFIXES = ['TG', 'GG', 'SV', 'RC', 'H'];
  * after them: with `totals` (every printed set size, from the catalog) "12/1014" (the
  * rarity star read as a digit), "IS/111" or "E5261/236" (letters around it) still give
  * 12/101, 15/111 and 261/236; a 3-digit number whose slash was lost or read as 7 or 1
- * ("1837165", "105123") gives 183/165 and 105/123.
+ * ("1837165", "105123") gives 183/165 and 105/123. A 1- or 2-digit number whose slash was
+ * misread or lost counts only with the rarity mark right after the set size, as older cards
+ * print it ("10164★" for 10/64★, "1664*" for 16/64), and only when nothing else was found:
+ * every reading that fits is given ("41102★": 4/102 or 41/102), for the name to decide.
  * Returns up to `max` [rawNum, rawTotal], most likely first.
  */
 function looseNumbers(t, totals, max = 2) {
   const found = [];
+  const short = [];
   // Runs of digits, slashes and letters OCR confuses with them. A comma or full stop inside
   // one is a stray mark ("1997,165"), or the slash before a zero-padded set size ("Q24,
   // 0886"; not in a list of years: "©1995, 96, 98"): both are tried.
@@ -52,6 +56,18 @@ function looseNumbers(t, totals, max = 2) {
     const pre = t.slice(Math.max(0, m.index - 4), m.index);
     const post = t.slice(m.index + m[0].length);
     if (!m[0].includes('/') && (/(#|N[oO0]\.?\s*|L[vV]\.?\s*|HP\s*|[-+×©])$/.test(pre) || /^\s*(lbs|HP|[+×,-])/.test(post))) continue;
+    // A 1- or 2-digit number, the slash read as 1 (or 7, l, I, |) or lost, the set size, then
+    // the rarity mark: "15164★", "4130*". Older cards print no zero in front of either.
+    if (!/[/,.]/.test(m[0]) && /^\s?[★☆*•●◆]/.test(post) && /^[1-9]\d?[71lI|]?[1-9]\d{1,2}$/.test(s)) {
+      for (const k of [1, 2]) {
+        for (const slash of [1, 0]) {
+          const [raw, sep, tot] = [s.slice(0, k), s.slice(k, k + slash), s.slice(k + slash)];
+          if (!/^\d+$/.test(raw) || (slash && !/[71lI|]/.test(sep)) || !/^[1-9]\d{1,2}$/.test(tot) || !totals.has(+tot) || +raw > +tot) continue;
+          // The slash read as a character first, then a 3-digit size.
+          short.push({ raw, tot, score: slash + tot.length });
+        }
+      }
+    }
     for (let i = 1; i < s.length; i++) {
       // The set size: 3 digits, or 2 (modern sets print "088" for 88, which reads either way).
       for (const len of [3, 2]) {
@@ -84,7 +100,7 @@ function looseNumbers(t, totals, max = 2) {
       }
     }
   }
-  return found
+  return (found.length ? found : short)
     .sort((a, b) => b.score - a.score)
     .slice(0, max)
     .map((f) => [f.raw, f.tot]);
@@ -158,10 +174,11 @@ export function parseBottomText(text, { totals } = {}) {
     if (/[A-Z]/.test(code) && !setCodes.includes(code)) setCodes.push(code);
   }
 
-  // Promos without a total: "SWSH050", "SM210", "SVP EN 045", "MEP 012".
+  // Promos without a total: "SWSH050", "SM210", "SVP EN 045", "MEP 012" (a zero read as
+  // "O" too: "HGSSO8").
   if (!numbers.some((n) => n.total)) {
-    const promoRe = new RegExp(`\\b(${PROMO_PREFIXES.join('|')})\\s*(?:EN)?\\s*[-:#]?\\s*(\\d{1,3})\\b`, 'g');
-    for (const m of t.matchAll(promoRe)) push(m[1].toUpperCase(), m[2], null);
+    const promoRe = new RegExp(`\\b(${PROMO_PREFIXES.join('|')})\\s*(?:EN)?\\s*[-:#]?\\s*([0-9O]{1,3})\\b`, 'g');
+    for (const m of t.matchAll(promoRe)) if (hasDigit(m[2])) push(m[1].toUpperCase(), m[2], null);
     // Number right after a set code: "OBF EN 125" when the "/197" got lost.
     for (const m of t.matchAll(/\b[A-Z]{3}\s*EN\s*(\d{1,3})\b/g)) push('', m[1], null);
     // Else a number printed zero-padded ("067": Mega Evolution promos print no set size),
